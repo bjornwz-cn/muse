@@ -1,6 +1,6 @@
 {
-  "versionCode": 12,
-  "versionName": "0.3.3",
+  "versionCode": 13,
+  "versionName": "0.3.4",
   "apkUrl": "https://raw.githubusercontent.com/bjornwz-cn/muse/main/update/earbuddy-latest.apk",
-  "changelog": "v0.3.3 界面瘦身：主界面只保留状态总览、2×2 快捷入口（翻译/记录/测试播报/规则）、两个开关和一行保活摘要，一屏看完；初始化四步与保活自检详情收进「初始化与保活自检」二级页。顺带修正心跳显示偶发误报红点的问题。"
+  "changelog": "v0.3.4 界面细节修复：①全面屏适配——内容自动避开状态栏/挖孔/灵动岛，不再被挡；所有页面（主页/设置自检/翻译/记录/规则）统一生效；②快捷按钮等高单行，长标签不再窜行撑高。"
 }
