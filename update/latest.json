@@ -1,6 +1,6 @@
 {
-  "versionCode": 4,
-  "versionName": "0.2.1",
+  "versionCode": 5,
+  "versionName": "0.2.2",
   "apkUrl": "https://raw.githubusercontent.com/bjornwz-cn/muse/main/update/earbuddy-latest.apk",
-  "changelog": "v0.2.1：界面大改版（新图标、卡片布局、规则列表带应用图标）；应用内更新上线，更新源走本仓库。装上本版后，后续版本在应用内点「检查更新」即可升级。"
+  "changelog": "v0.2.2：①播报时自动压低当前媒体音量（音频焦点避让）；②通话中只轻响提示、不播报内容，通话结束自动补播；③多条通知同时到达时按优先级排序逐条播报（白名单 ＞ 微信/短信等通讯类 ＞ 其他）。"
 }
