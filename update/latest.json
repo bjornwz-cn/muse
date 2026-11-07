@@ -1,0 +1,6 @@
+{
+  "versionCode": 4,
+  "versionName": "0.2.1",
+  "apkUrl": "https://raw.githubusercontent.com/bjornwz-cn/muse/main/update/earbuddy-latest.apk",
+  "changelog": "v0.2.1：界面大改版（新图标、卡片布局、规则列表带应用图标）；应用内更新上线，更新源走本仓库。装上本版后，后续版本在应用内点「检查更新」即可升级。"
+}
