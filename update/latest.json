@@ -1,6 +1,6 @@
 {
-  "versionCode": 5,
-  "versionName": "0.2.2",
+  "versionCode": 6,
+  "versionName": "0.2.3",
   "apkUrl": "https://raw.githubusercontent.com/bjornwz-cn/muse/main/update/earbuddy-latest.apk",
-  "changelog": "v0.2.2：①播报时自动压低当前媒体音量（音频焦点避让）；②通话中只轻响提示、不播报内容，通话结束自动补播；③多条通知同时到达时按优先级排序逐条播报（白名单 ＞ 微信/短信等通讯类 ＞ 其他）。"
+  "changelog": "v0.2.3 低延迟版：①语音引擎保温，空闲时定期静音唤醒引擎，压低开口延迟；②主界面新增「播报延迟」实测显示（最近/平均毫秒数）；③可自选语音引擎——本地引擎通常比云端引擎开口更快，在「选择语音引擎」里切换试试。"
 }
