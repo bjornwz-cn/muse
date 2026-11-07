@@ -1,6 +1,6 @@
 {
-  "versionCode": 7,
-  "versionName": "0.2.4",
+  "versionCode": 8,
+  "versionName": "0.2.5",
   "apkUrl": "https://raw.githubusercontent.com/bjornwz-cn/muse/main/update/earbuddy-latest.apk",
-  "changelog": "v0.2.4 后台保活加强：①被从最近任务划掉后，服务 2 秒自拉起；②通知监听被系统解绑时主动请求重连；③初始化新增第 3 步「应用启动管理设为手动」，荣耀手机切到后台不播报主要是这个开关——关掉自动管理并打开允许自启动/关联启动/后台活动。"
+  "changelog": "v0.2.5 新增「保活自检」卡：权限与电量白名单直读系统状态；服务心跳实时显示；后台被冻结/杀死会留下中断记录（时间+时长）；含 60 秒后台存活实测——切去别的 App 停留 60 秒回来，进程活没活过一目了然，杜绝假完成。"
 }
