@@ -1,6 +1,6 @@
 {
-  "versionCode": 11,
-  "versionName": "0.3.2",
+  "versionCode": 12,
+  "versionName": "0.3.3",
   "apkUrl": "https://raw.githubusercontent.com/bjornwz-cn/muse/main/update/earbuddy-latest.apk",
-  "changelog": "v0.3.2 修复关屏重复播报：关屏后系统冻结进程、解冻重连时会把通知栏现存通知重播一遍，现增加三层去重——通知唯一标识（key+发布时间+内容指纹）持久化去重、发布时间超过 10 分钟的旧通知不播、播报队列同文本 30 秒内不重复入队。"
+  "changelog": "v0.3.3 界面瘦身：主界面只保留状态总览、2×2 快捷入口（翻译/记录/测试播报/规则）、两个开关和一行保活摘要，一屏看完；初始化四步与保活自检详情收进「初始化与保活自检」二级页。顺带修正心跳显示偶发误报红点的问题。"
 }
