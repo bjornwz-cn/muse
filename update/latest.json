@@ -1,6 +1,6 @@
 {
-  "versionCode": 17,
-  "versionName": "0.4.1",
+  "versionName": "0.4.2",
+  "versionCode": 18,
   "apkUrl": "https://raw.githubusercontent.com/bjornwz-cn/muse/main/update/earbuddy-latest.apk",
-  "changelog": "v0.4.1 云端识别渠道（预设+自填Key）：翻译页新增「识别引擎」——离线标准/高精度之外，可选云端渠道：Groq Whisper（免费额度，音乐耐受强）、硅基流动 SenseVoice（国内直连，中文强）、OpenAI Whisper、自定义（OpenAI兼容）。选渠道后填自己的 Key（只存本机），每个渠道带「获取Key」直达链接。云端模式下离线引擎负责切分兜底、云端负责重识别，准确率质变；火山引擎价格已调研（免费20小时，约4.5元/小时），入口在引擎列表里。状态栏会显示当前实际引擎，杜绝假切换。"
+  "notes": "火山引擎流式识别 2.0 接入（已实测跑通）：翻译页→识别引擎→选「云端·火山流式识别 2.0」→粘贴你的火山 API Key 保存即可。真流式边说边出字、定稿有二遍识别纠错，识别质量为豆包大模型级别；免费试用 20 小时。原离线/ Groq 等渠道不受影响。"
 }
