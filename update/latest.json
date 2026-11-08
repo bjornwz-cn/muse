@@ -1,6 +1,6 @@
 {
-  "versionCode": 14,
-  "versionName": "0.3.5",
+  "versionCode": 15,
+  "versionName": "0.3.6",
   "apkUrl": "https://raw.githubusercontent.com/bjornwz-cn/muse/main/update/earbuddy-latest.apk",
-  "changelog": "v0.3.5 蓝牙耳机门闸：只有蓝牙耳机连接时才自动播报；在「设置与自检 → 播报设备」里可从已绑定设备中指定播报耳机（如只认 FreeBuds，连车载/音箱不播）。未连接期间的通知先暂存，耳机连上后汇总补播（白名单念全文）；主界面状态栏会显示当前连接的是哪台设备、是否播报。"
+  "changelog": "v0.3.6 模型下载多源化：小模型（中/英）改为多源依次下载——源1 GitHub 镜像（与应用更新同一通道，国内可达，模型包已预置在更新仓库），源2 官方 alphacephei 兜底；任一源成功即继续，状态栏会显示正在用第几个源。高精度大模型另支持「导入本地模型包」：电脑下载 zip 后传入手机，在翻译页选目标模型导入即可。"
 }
