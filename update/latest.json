@@ -1,6 +1,6 @@
 {
-  "versionCode": 13,
-  "versionName": "0.3.4",
+  "versionCode": 14,
+  "versionName": "0.3.5",
   "apkUrl": "https://raw.githubusercontent.com/bjornwz-cn/muse/main/update/earbuddy-latest.apk",
-  "changelog": "v0.3.4 界面细节修复：①全面屏适配——内容自动避开状态栏/挖孔/灵动岛，不再被挡；所有页面（主页/设置自检/翻译/记录/规则）统一生效；②快捷按钮等高单行，长标签不再窜行撑高。"
+  "changelog": "v0.3.5 蓝牙耳机门闸：只有蓝牙耳机连接时才自动播报；在「设置与自检 → 播报设备」里可从已绑定设备中指定播报耳机（如只认 FreeBuds，连车载/音箱不播）。未连接期间的通知先暂存，耳机连上后汇总补播（白名单念全文）；主界面状态栏会显示当前连接的是哪台设备、是否播报。"
 }
