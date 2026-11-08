@@ -1,6 +1,6 @@
 {
-  "versionCode": 38,
-  "versionName": "0.8.0",
+  "versionCode": 39,
+  "versionName": "0.8.1",
   "url": "https://raw.githubusercontent.com/bjornwz-cn/muse/main/update/earbuddy-latest.apk",
-  "notes": "新增诊断日志系统：播报/翻译/保活/更新/崩溃等关键事件全程记录（默认只记元数据，不含通知与识别原文）。设置页新增「诊断日志」卡：一键发送日志给 Muse；填好私有仓令牌后每天自动上传，Muse 定期读取做优化。"
+  "notes": "修复诊断日志自动上传被 GitHub 拦截（409）：日志正文里若混入密钥样式字符串，现自动打码后再记录/导出/上传。另：日志上传链路问题已定位完毕，装此版后点一次「立即上传」即可打通。"
 }
