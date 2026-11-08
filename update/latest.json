@@ -1,6 +1,6 @@
 {
-  "versionName": "0.4.2",
-  "versionCode": 18,
+  "versionName": "0.4.3",
+  "versionCode": 19,
   "apkUrl": "https://raw.githubusercontent.com/bjornwz-cn/muse/main/update/earbuddy-latest.apk",
-  "notes": "火山引擎流式识别 2.0 接入（已实测跑通）：翻译页→识别引擎→选「云端·火山流式识别 2.0」→粘贴你的火山 API Key 保存即可。真流式边说边出字、定稿有二遍识别纠错，识别质量为豆包大模型级别；免费试用 20 小时。原离线/ Groq 等渠道不受影响。"
+  "notes": "悬浮按钮改版：点一下自动开始翻译（不再先进软件界面）；切到视频等其他 App 后，屏幕下方出现悬浮字幕条（上行原文实时滚动、下行译文），字幕条右上角 ✕ 或再点悬浮按钮即可停止。回到耳机助手界面时字幕条自动收起。火山流式识别 2.0 等原有功能不变。"
 }
