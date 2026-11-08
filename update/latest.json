@@ -1,6 +1,6 @@
 {
-  "versionCode": 25,
-  "versionName": "0.4.9",
+  "versionCode": 26,
+  "versionName": "0.4.10",
   "url": "https://raw.githubusercontent.com/bjornwz-cn/muse/main/update/earbuddy-latest.apk",
-  "notes": "修复检查更新失败：更新清单的字段名对不上导致解析中断（我的发布格式问题），已改为双格式兼容；同时改为双源检查（GitHub直连+jsDelivr镜像），国内网络下任一通即可，下载也会自动换源。本版需手动装一次（旧版更新器坏了下不动），装上后后续版本恢复应用内更新。"
+  "notes": "修两处：①切换翻译服务后按钮文字不刷新的问题（选了谷歌仍显示微软）；②微软与谷歌互为兜底：首选哪家失败都会自动换另一家再译，不再整段报网络错误、丢译文。另：超时缩短，失败切换更快。"
 }
