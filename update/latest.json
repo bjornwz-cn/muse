@@ -1,6 +1,6 @@
 {
-  "versionCode": 28,
-  "versionName": "0.4.12",
+  "versionCode": 29,
+  "versionName": "0.5.0",
   "url": "https://raw.githubusercontent.com/bjornwz-cn/muse/main/update/earbuddy-latest.apk",
-  "notes": "火山翻译改为语音技术控制台的机器翻译（MATX）：只需填一把 API Key（与语音识别同款），不用再搞访问密钥 AK/SK。翻译页→翻译服务→火山翻译→粘贴 API Key 保存即启用。已实测中英双向翻译通过，质量为大模型级，按 token 计费、用量很小。"
+  "notes": "同传成句化：识别碎片先攒成整句再交给大模型翻译（火山MATX），不再逐词报；触发规则：句末标点且够长 / 超长 / 停顿1.6秒。方向新增自动模式：自动识别→中文、自动识别→English、双向自动（中英互译，按每句语言自动定方向，日韩语句自动译成中文）；自动模式建议配火山流式识别引擎。另：停止后记录延迟1.2秒保存，最后一句不再丢。"
 }
