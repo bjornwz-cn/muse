@@ -1,6 +1,6 @@
 {
-  "versionCode": 40,
-  "versionName": "0.8.2",
+  "versionCode": 41,
+  "versionName": "0.8.3",
   "url": "https://raw.githubusercontent.com/bjornwz-cn/muse/main/update/earbuddy-latest.apk",
-  "notes": "修复译文朗读：原「朗读译文（进耳机）」开关把去向和开关混在一起，关掉就全程无声。翻译设置改为「朗读输出」三档：自动（有耳机走耳机、没耳机手机外放，默认）/ 仅耳机 / 关。"
+  "notes": "修复外放朗读死循环：手机外放译文时麦克风会把译文当原文反复翻译。麦克风采集新增防回授：朗读期间及结束后 0.4 秒内不收音；戴耳机时声音不外泄，不受影响、保持全双工。"
 }
