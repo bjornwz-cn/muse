@@ -1,6 +1,6 @@
 {
-  "versionCode": 27,
-  "versionName": "0.4.11",
+  "versionCode": 28,
+  "versionName": "0.4.12",
   "url": "https://raw.githubusercontent.com/bjornwz-cn/muse/main/update/earbuddy-latest.apk",
-  "notes": "新增火山翻译通道（国内直连，每月200万字符免费）：翻译页→翻译服务→选「火山翻译」，把火山控制台的 AccessKey ID 与 Secret AccessKey 填入即启用（与语音识别那把 API Key 不是同一套）。火山失败时仍自动兜底微软/谷歌。"
+  "notes": "火山翻译改为语音技术控制台的机器翻译（MATX）：只需填一把 API Key（与语音识别同款），不用再搞访问密钥 AK/SK。翻译页→翻译服务→火山翻译→粘贴 API Key 保存即启用。已实测中英双向翻译通过，质量为大模型级，按 token 计费、用量很小。"
 }
