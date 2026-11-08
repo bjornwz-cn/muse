@@ -1,6 +1,6 @@
 {
-  "versionCode": 26,
-  "versionName": "0.4.10",
+  "versionCode": 27,
+  "versionName": "0.4.11",
   "url": "https://raw.githubusercontent.com/bjornwz-cn/muse/main/update/earbuddy-latest.apk",
-  "notes": "修两处：①切换翻译服务后按钮文字不刷新的问题（选了谷歌仍显示微软）；②微软与谷歌互为兜底：首选哪家失败都会自动换另一家再译，不再整段报网络错误、丢译文。另：超时缩短，失败切换更快。"
+  "notes": "新增火山翻译通道（国内直连，每月200万字符免费）：翻译页→翻译服务→选「火山翻译」，把火山控制台的 AccessKey ID 与 Secret AccessKey 填入即启用（与语音识别那把 API Key 不是同一套）。火山失败时仍自动兜底微软/谷歌。"
 }
