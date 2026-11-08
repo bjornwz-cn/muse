@@ -1,6 +1,6 @@
 {
-  "versionCode": 34,
-  "versionName": "0.7.1",
+  "versionCode": 35,
+  "versionName": "0.7.2",
   "url": "https://raw.githubusercontent.com/bjornwz-cn/muse/main/update/earbuddy-latest.apk",
-  "notes": "修复播报页看不到应用名单：重组后应用列表被上方卡片挤出屏幕，现改为列表区占满剩余高度、内部滚动。"
+  "notes": "含0.7.1的应用名单修复；另做全量代码清理（功能无变化）：删除4处死代码（旧AK/SK残留、无人调用的旧函数）、火山协议编解码抽为共用模块、主页与设置页重复的系统状态检测合并为一处。"
 }
