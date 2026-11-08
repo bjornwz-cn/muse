@@ -1,6 +1,6 @@
 {
-  "versionName": "0.4.6",
-  "versionCode": 22,
-  "apkUrl": "https://raw.githubusercontent.com/bjornwz-cn/muse/main/update/earbuddy-latest.apk",
-  "notes": "1) 悬浮按钮双状态：空闲=绿底「译」，翻译中=红底「停」，从通知栏/字幕条停掉也会自动变回。2) 新增静音自动停：翻译页可设阈值（关/3/5/10/20 分钟，默认 5），连续无声音无识别自动停止并提示，防忘关扣费。3) 翻译暂停判定改为只认传统电话，腾讯会议等 VoIP 不再误停（会议同传的前置修复）。"
+  "versionCode": 23,
+  "versionName": "0.4.7",
+  "url": "https://raw.githubusercontent.com/bjornwz-cn/muse/main/update/earbuddy-latest.apk",
+  "notes": "新增会议录音存档：翻译进行时同步保存本场音频（默认开，翻译页「录音存档」可关），通知栏会显示「录音存档中」；停止后自动压缩成小文件（约21MB/小时）。会后到「翻译记录」点开那场会议，点「分享录音」即可发到微信/YoooClaw等。录的是内部音频源时只有会议原声，不含译文朗读。"
 }
