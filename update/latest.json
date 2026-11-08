@@ -1,6 +1,6 @@
 {
-  "versionCode": 39,
-  "versionName": "0.8.1",
+  "versionCode": 40,
+  "versionName": "0.8.2",
   "url": "https://raw.githubusercontent.com/bjornwz-cn/muse/main/update/earbuddy-latest.apk",
-  "notes": "修复诊断日志自动上传被 GitHub 拦截（409）：日志正文里若混入密钥样式字符串，现自动打码后再记录/导出/上传。另：日志上传链路问题已定位完毕，装此版后点一次「立即上传」即可打通。"
+  "notes": "修复译文朗读：原「朗读译文（进耳机）」开关把去向和开关混在一起，关掉就全程无声。翻译设置改为「朗读输出」三档：自动（有耳机走耳机、没耳机手机外放，默认）/ 仅耳机 / 关。"
 }
