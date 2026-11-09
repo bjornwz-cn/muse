@@ -1,6 +1,6 @@
 {
-  "versionCode": 41,
-  "versionName": "0.8.3",
+  "versionCode": 42,
+  "versionName": "0.8.4",
   "url": "https://raw.githubusercontent.com/bjornwz-cn/muse/main/update/earbuddy-latest.apk",
-  "notes": "修复外放朗读死循环：手机外放译文时麦克风会把译文当原文反复翻译。麦克风采集新增防回授：朗读期间及结束后 0.4 秒内不收音；戴耳机时声音不外泄，不受影响、保持全双工。"
+  "notes": "日间降噪：1) 播报不再念微信的未读计数（[N条]）；2) 同一会话连发合并——60 秒内的后续消息先攒着，安静 20 秒后只播最新一条；3) 同一内容只因计数变化重复出现时直接去重，不再把旧消息反复念。单条消息仍即时播报。另外补播日志现在会记录积压被丢弃/过期的数量。"
 }
