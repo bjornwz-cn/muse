@@ -1,0 +1,4 @@
+#!/bin/bash
+### This script is called after the user uninstalls the application.
+# 数据默认保留（@appshare/nas-curator 下的 DB 与 config），重装可恢复；不自动删。
+exit 0

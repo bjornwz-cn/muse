@@ -1,0 +1,143 @@
+{% extends "base.html" %}
+{% block title %}复核队列{% endblock %}
+{% block content %}
+<h1>复核队列</h1>
+<p class="lead">日常打开首先看到的就是这里：<strong id="pending-count">…</strong> 条待点，点完即空。</p>
+
+<div class="btn-row" style="margin-bottom:12px">
+  <label class="check" style="margin:0">类型筛选
+    <select id="kind-filter" class="inline-input">
+      <option value="">全部</option>
+      <option value="low_conf">低置信</option>
+      <option value="dup">重复</option>
+      <option value="blur">模糊</option>
+      <option value="ambiguous">待确认</option>
+      <option value="sensitive">敏感</option>
+      <option value="shell">空壳</option>
+    </select>
+  </label>
+  <button class="btn ghost small" id="btn-refresh" type="button">刷新</button>
+  <span style="flex:1"></span>
+  <label class="check" style="margin:0"><input type="checkbox" id="select-all"> 全选</label>
+  <button class="btn small" id="btn-bulk-approve" type="button">批量批准</button>
+  <button class="btn ghost small" id="btn-bulk-reject" type="button">批量拒绝</button>
+</div>
+
+<div id="review-error"></div>
+<div id="review-list"><p class="loading">加载中…</p></div>
+{% endblock %}
+{% block scripts %}
+<script>
+(function () {
+  var C = window.Curator;
+  var listEl = document.getElementById('review-list');
+  var countEl = document.getElementById('pending-count');
+
+  function categoryOptions(selected) {
+    /* 建议分类以下拉改；选项为三库顶级分类口径，后端返回 categories 后可再扩展。 */
+    var opts = ['工作', '家庭', '媒体'];
+    return opts.map(function (o) {
+      return '<option value="' + C.esc(o) + '"' + (o === selected ? ' selected' : '') + '>' + C.esc(o) + '</option>';
+    }).join('');
+  }
+
+  function itemHtml(it) {
+    var p = it.payload || {};
+    return '<article class="review-item" data-id="' + C.esc(it.id) + '">' +
+      '<div class="head">' +
+        '<input type="checkbox" class="review-check" value="' + C.esc(it.id) + '" aria-label="选中此条">' +
+        '<span class="path">' + C.esc(p.src || it.src || '') + '</span>' +
+        C.kindTag(it.kind) +
+      '</div>' +
+      '<div style="margin-top:8px;display:flex;gap:16px;flex-wrap:wrap;align-items:center">' +
+        '<span>建议分类：<strong>' + C.esc(p.category || '—') + '</strong></span>' +
+        C.confBar(p.confidence) +
+      '</div>' +
+      '<p style="margin:8px 0 0">' + C.esc(p.reason || '') + '</p>' +
+      (p.evidence ? '<p class="evidence" style="margin:4px 0 0">依据：' + C.esc(p.evidence) + '</p>' : '') +
+      (p.suggested_dst ? '<p class="dst" style="margin:4px 0 0">建议目标：' + C.esc(p.suggested_dst) + '</p>' : '') +
+      '<div class="review-edit">' +
+        '<div><label>改分类</label><select class="edit-category inline-input">' + categoryOptions(p.category) + '</select></div>' +
+        '<div><label>改名（留空则不改名）</label><input type="text" class="edit-name inline-input" placeholder="新文件名"></div>' +
+        '<div><label>打标签（逗号分隔）</label><input type="text" class="edit-tags inline-input" placeholder="如：合同,2026" value="' + C.esc((p.tags || []).join(',')) + '"></div>' +
+      '</div>' +
+      '<div class="btn-row" style="margin-top:10px">' +
+        '<button class="btn small btn-approve" type="button">批准</button>' +
+        '<button class="btn ghost small btn-reject" type="button">拒绝</button>' +
+      '</div>' +
+    '</article>';
+  }
+
+  function removeItem(id) {
+    var el = listEl.querySelector('[data-id="' + CSS.escape(String(id)) + '"]');
+    if (el) el.remove();
+    var n = listEl.querySelectorAll('.review-item').length;
+    countEl.textContent = n;
+    if (n === 0) listEl.innerHTML = '<p class="empty">复核队列已空 🎉</p>';
+    C.refreshReviewBadge();
+  }
+
+  async function decide(id, decision, extra) {
+    var body = Object.assign({ decision: decision }, extra || {});
+    var res = await C.api('/api/review/' + encodeURIComponent(id) + '/decide', { method: 'POST', body: body });
+    removeItem(id);
+    C.toast(decision === 'approved' ? '已批准' + (res && res.moved ? '，已移动到 ' + (res.dst || '') : '') : '已拒绝');
+  }
+
+  async function load() {
+    listEl.innerHTML = '<p class="loading">加载中…</p>';
+    try {
+      var kind = document.getElementById('kind-filter').value;
+      var q = '/api/review?status=pending' + (kind ? '&kind=' + encodeURIComponent(kind) : '');
+      var items = await C.api(q);
+      countEl.textContent = items.length;
+      listEl.innerHTML = items.length ? items.map(itemHtml).join('') : '<p class="empty">复核队列已空 🎉</p>';
+    } catch (e) {
+      C.showError(document.getElementById('review-error'), e);
+      listEl.innerHTML = '';
+    }
+  }
+
+  listEl.addEventListener('click', async function (ev) {
+    var btn = ev.target.closest('.btn-approve, .btn-reject');
+    if (!btn) return;
+    var item = ev.target.closest('.review-item');
+    var id = item.getAttribute('data-id');
+    var cat = item.querySelector('.edit-category').value;
+    var name = item.querySelector('.edit-name').value.trim();
+    var tags = item.querySelector('.edit-tags').value.split(',').map(function (t) { return t.trim(); }).filter(Boolean);
+    var extra = { category: cat };
+    if (name) extra.new_name = name;
+    if (tags.length) extra.tags = tags;
+    btn.disabled = true;
+    try {
+      await decide(id, btn.classList.contains('btn-approve') ? 'approved' : 'rejected', extra);
+    } catch (e) {
+      btn.disabled = false;
+      C.toast('操作失败：' + e.message, true);
+    }
+  });
+
+  async function bulk(decision) {
+    var ids = C.selectedValues('review-check');
+    if (!ids.length) { C.toast('请先勾选要批量处理的条目', true); return; }
+    try {
+      var res = await C.api('/api/review/bulk', { method: 'POST', body: { ids: ids, decision: decision } });
+      (res.results || ids.map(function (id) { return { id: id, ok: true }; })).forEach(function (r) {
+        if (r.ok) removeItem(r.id);
+      });
+      C.toast('批量' + (decision === 'approved' ? '批准' : '拒绝') + '完成');
+    } catch (e) {
+      C.toast('批量操作失败：' + e.message, true);
+    }
+  }
+
+  document.getElementById('kind-filter').addEventListener('change', load);
+  document.getElementById('btn-refresh').addEventListener('click', load);
+  document.getElementById('btn-bulk-approve').addEventListener('click', function () { bulk('approved'); });
+  document.getElementById('btn-bulk-reject').addEventListener('click', function () { bulk('rejected'); });
+  C.bindSelectAll('select-all', 'review-check');
+  load();
+})();
+</script>
+{% endblock %}

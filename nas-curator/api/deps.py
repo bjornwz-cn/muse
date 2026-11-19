@@ -1,0 +1,186 @@
+"""api.deps —— 共享依赖：DB 连接、配置读取。"""
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+
+from common import db as DB
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SHIPPED_CONFIG_DIR = os.path.join(PROJECT_ROOT, "config")
+# 容器内配置目录走数据卷（CURATOR_CONFIG_DIR=/data/config）；未指定则用项目自带 config/。
+CONFIG_DIR = os.environ.get("CURATOR_CONFIG_DIR") or SHIPPED_CONFIG_DIR
+LIBRARIES_JSON = os.path.join(CONFIG_DIR, "libraries.json")
+ENV_LOCAL = os.path.join(CONFIG_DIR, ".env.local")
+
+
+def get_setup_marker() -> str:
+    """首次安装向导完成标记：与 DB 文件同目录的 .setup_done。"""
+    return os.path.join(os.path.dirname(get_db_path()), ".setup_done")
+
+
+def is_setup_done() -> bool:
+    return os.path.exists(get_setup_marker())
+
+
+def mark_setup_done() -> None:
+    marker = get_setup_marker()
+    os.makedirs(os.path.dirname(marker), exist_ok=True)
+    with open(marker, "w", encoding="utf-8") as f:
+        f.write("setup done\n")
+
+
+def ensure_config() -> None:
+    """容器首次启动：数据卷配置目录缺失时，从镜像自带 config/ 复制默认配置。
+
+    只复制 libraries.json（不含任何凭据）；.env.local 绝不复制（向导页输入后才生成）。
+    本地开发（CONFIG_DIR == 自带目录）时什么都不做。
+    """
+    if os.path.abspath(CONFIG_DIR) == os.path.abspath(SHIPPED_CONFIG_DIR):
+        return
+    if os.path.exists(LIBRARIES_JSON):
+        return
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    shipped = os.path.join(SHIPPED_CONFIG_DIR, "libraries.json")
+    if os.path.exists(shipped):
+        import shutil
+        shutil.copyfile(shipped, LIBRARIES_JSON)
+
+DEFAULT_DB = os.path.join(PROJECT_ROOT, "data", "nas-curator.db")
+
+# 模型端点默认值（与 curator.py build_parser 的默认值一致；只读配置，不主动连接）
+DEFAULT_LLM_HOST = "http://172.17.0.1:11434"
+DEFAULT_SEM_HOST = "http://172.17.0.1:11500"
+DEFAULT_OCR_URL = "http://127.0.0.1:8866"
+
+# 凭据 provider → 环境变量名（只做映射，值绝不进代码/日志）
+KEY_ENV_VARS = {
+    "ark_plan": "ARK_PLAN_KEY",
+    "ark_payg": "ARK_PAYG_KEY",
+}
+
+
+def get_db_path() -> str:
+    """DB 路径：环境变量 CURATOR_DB，否则项目 data/nas-curator.db（与 CLI 默认一致）。"""
+    return os.environ.get("CURATOR_DB") or DEFAULT_DB
+
+
+def get_db():
+    """每请求一个连接，用完关闭。check_same_thread=False（FastAPI 线程池）。"""
+    conn = sqlite3.connect(get_db_path(), check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=30000")  # 与 DB.connect 一致：Web 与收件箱监听并发写
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def load_libraries() -> dict:
+    """读 config/libraries.json；读不到返回空骨架（不抛错，接口降级返回空列表）。"""
+    try:
+        with open(LIBRARIES_JSON, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {"libraries": [], "inbox": {}, "thresholds": {}, "excluded": []}
+
+
+def load_media_config() -> dict:
+    """读 media_core/config.json（媒体阈值 / auto_apply 兜底来源）。"""
+    try:
+        with open(os.path.join(PROJECT_ROOT, "media_core", "config.json"),
+                  encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def get_settings() -> dict:
+    """汇总设置：libraries.json + 媒体配置兜底 + 模型端点默认值。
+
+    auto_apply 口径：libraries.json 顶层 auto_apply（PUT /api/settings 可写）；
+    未设置时取 media_core/config.json 的 auto_apply；再没有则 False。
+    """
+    cfg = load_libraries()
+    media_cfg = load_media_config()
+    thresholds = dict(cfg.get("thresholds") or {})
+    thresholds.setdefault("auto", 0.85)
+    thresholds.setdefault("review_suggest", 0.60)
+    me = dict(cfg.get("model_endpoints") or {})
+    model_endpoints = {
+        "llm_host": me.get("llm_host") or os.environ.get("LLM_HOST") or DEFAULT_LLM_HOST,
+        "sem_host": me.get("sem_host") or os.environ.get("SEM_HOST") or DEFAULT_SEM_HOST,
+        "ocr_url": me.get("ocr_url") or os.environ.get("OCR_URL") or DEFAULT_OCR_URL,
+    }
+    inbox = dict(cfg.get("inbox") or {})
+    schedule = {
+        "inbox_scan_minutes": inbox.get("scan_interval_minutes", 30),
+        "settle_minutes": inbox.get("settle_minutes", 3),
+    }
+    auto_apply = cfg.get("auto_apply")
+    if auto_apply is None:
+        auto_apply = bool(media_cfg.get("auto_apply", False))
+    return {
+        "libraries": cfg.get("libraries", []),
+        "input_sources": cfg.get("input_sources", []),
+        "inbox": inbox,
+        "excluded": cfg.get("excluded", []),
+        "thresholds": thresholds,
+        "model_endpoints": model_endpoints,
+        "auto_apply": bool(auto_apply),
+        "schedule": schedule,
+        "_raw": cfg,  # 内部用：写回时以此为底
+    }
+
+
+def public_settings() -> dict:
+    """GET /api/settings 的返回体：get_settings() 去内部键 + 掩码后的凭据。"""
+    s = get_settings()
+    s.pop("_raw", None)
+    s["keys"] = masked_keys()
+    return s
+
+
+def read_env_local() -> dict:
+    """解析 config/.env.local（KEY=VALUE 行，# 注释跳过）。不存在返回 {}。"""
+    out = {}
+    try:
+        with open(ENV_LOCAL, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                out[k.strip()] = v.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return out
+
+
+def mask_key(value: str) -> str:
+    """掩码：前 2 + **** + 后 2；长度 ≤4 全掩码；空值返回空串。"""
+    if not value:
+        return ""
+    if len(value) <= 4:
+        return "****"
+    return f"{value[:2]}****{value[-2:]}"
+
+
+def masked_keys() -> dict:
+    """已配置的 provider → 掩码值。只读 .env.local 与环境变量，绝不返回明文。"""
+    stored = read_env_local()
+    out = {}
+    for provider, env_var in KEY_ENV_VARS.items():
+        value = stored.get(env_var) or os.environ.get(env_var) or ""
+        if value:
+            out[provider] = mask_key(value)
+    return out
+
+
+def key_env_var(provider: str) -> str:
+    """provider → 环境变量名；未知 provider 按 <PROVIDER>_KEY 通用规则。"""
+    return KEY_ENV_VARS.get(provider) or (provider.strip().upper().replace("-", "_") + "_KEY")

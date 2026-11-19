@@ -1,0 +1,9 @@
+#!/bin/bash
+### This script is called after the user installs the application.
+# 尽力而为创建统一收件箱目录（P3 部署时已由管理员直接建好，此处为重装时的兜底）。
+# 失败不影响安装（exit 0）：/vol1/1000 为 mode 000 + trimacl，非 root 身份建不了，
+# 届时由管理员在 NAS 上建（mkdir + chown 1000:1000）。
+mkdir -p /vol1/1000/收件箱 2>/dev/null
+chown 1000:1000 /vol1/1000/收件箱 2>/dev/null
+chmod 755 /vol1/1000/收件箱 2>/dev/null
+exit 0

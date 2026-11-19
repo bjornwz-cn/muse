@@ -1,0 +1,15 @@
+appname               = nas-curator
+version               = 0.1.1
+display_name          = NAS Curator 文件管家
+desc                  = 统一整理 NAS 文档与媒体库：规则内自动分类存放、自动改名、打标签，减少人工操作。一个统一收件箱，自动判断归工作、家庭、媒体哪一类。首次打开应用时有三步安装向导（库路径、模型端点、定时与自动执行）。
+platform              = x86
+source                = thirdparty
+maintainer            = Muse
+distributor           = Muse
+desktop_uidir         = ui
+desktop_applaunchname = nas-curator.Application
+os_min_version        = 0.9.0
+install_type          =
+service_port          = 8765
+checkport             = true
+changelog             = 0.1.1 修 Web API 自动执行门控缺口（被拦低置信项进复核队列，与 CLI 同口径）；plan 加 --deep 深挖模式（修库全量覆盖）；按库选规则（家庭计划用家庭规则）；HF_HUB_CACHE 与收件箱 plan CSV 落持久卷对齐。

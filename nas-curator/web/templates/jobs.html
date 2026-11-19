@@ -1,0 +1,203 @@
+{% extends "base.html" %}
+{% block title %}整理任务{% endblock %}
+{% block content %}
+<h1>整理任务</h1>
+<p class="lead">发起一次整理：先出计划（dry-run），确认后才执行；每次执行都可一键回滚。</p>
+
+<h2>发起整理</h2>
+<form id="job-form">
+  <div class="form-row">
+    <div class="field">
+      <label for="f-root">目录路径（root，与下方选库二选一填一个）</label>
+      <input type="text" id="f-root" placeholder="/vol1/1000/收件箱">
+    </div>
+    <div class="field">
+      <label for="f-library">或选库（library）</label>
+      <select id="f-library">
+        <option value="">— 不选库，用上方路径 —</option>
+        <option value="work">工作</option>
+        <option value="family">家庭</option>
+        <option value="media">媒体</option>
+        <option value="mac-backup">笔记本备份</option>
+        <option value="inbox">统一收件箱</option>
+      </select>
+    </div>
+  </div>
+  <label class="check"><input type="checkbox" id="f-dry-run" checked> dry-run（只出计划，不执行）</label>
+  <label class="check"><input type="checkbox" id="f-llm"> 使用 LLM 兜底判定（use_llm）</label>
+  <label class="check"><input type="checkbox" id="f-sem"> 使用语义向量（use_sem）</label>
+  <label class="check"><input type="checkbox" id="f-rename"> 允许自动改名（rename）</label>
+  <div class="btn-row">
+    <button class="btn" type="submit">发起任务</button>
+    <span class="muted">提交后自动轮询进度。</span>
+  </div>
+</form>
+
+<div id="job-error"></div>
+
+<section id="job-status" hidden>
+  <h2>任务进度</h2>
+  <div class="card"><div id="job-status-body">—</div></div>
+</section>
+
+<section id="plan-section" hidden>
+  <h2>计划明细</h2>
+  <p class="muted" id="plan-summary"></p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>来源</th><th>目标</th><th>分类</th><th>置信度</th><th>动作</th><th>状态</th></tr></thead>
+      <tbody id="plan-body"><tr><td colspan="6" class="muted">—</td></tr></tbody>
+    </table>
+  </div>
+  <div class="btn-row" style="margin-top:12px">
+    <button class="btn" id="btn-apply" type="button">确认执行</button>
+    <span class="muted">执行前请核对计划明细；高置信且开自动执行时计划会自动确认。</span>
+  </div>
+</section>
+
+<section id="report-section" hidden>
+  <h2>执行报告</h2>
+  <div class="card"><div id="report-body">—</div></div>
+  <div class="btn-row" style="margin-top:12px">
+    <button class="btn danger" id="btn-rollback" type="button">回滚本次执行</button>
+    <span class="muted">按操作记录逆序移回；回滚本身也记一条操作，可再反悔。</span>
+  </div>
+</section>
+
+<h2>任务历史</h2>
+<div class="table-wrap">
+  <table>
+    <thead><tr><th>任务</th><th>类型</th><th>状态</th><th>开始</th><th>结束</th><th></th></tr></thead>
+    <tbody id="jobs-body"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
+  </table>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+(function () {
+  var C = window.Curator;
+  var currentJobId = null, currentPlanId = null, stopPoll = null;
+
+  async function loadHistory() {
+    try {
+      var jobs = await C.api('/api/jobs');
+      document.getElementById('jobs-body').innerHTML = jobs.length ? jobs.map(function (j) {
+        return '<tr><td class="path">' + C.esc(j.id) + '</td><td>' + C.esc(j.kind) + '</td>' +
+          '<td>' + C.statusTag(j.status) + '</td><td class="nowrap">' + C.fmtTime(j.started_at) + '</td>' +
+          '<td class="nowrap">' + C.fmtTime(j.finished_at) + '</td>' +
+          '<td><button class="btn ghost small btn-view-job" data-id="' + C.esc(j.id) + '" type="button">查看</button></td></tr>';
+      }).join('') : '<tr><td colspan="6" class="muted">暂无任务</td></tr>';
+    } catch (e) {
+      document.getElementById('jobs-body').innerHTML = '<tr><td colspan="6" class="error">加载失败：' + C.esc(e.message) + '</td></tr>';
+    }
+  }
+
+  function renderPlan(data) {
+    var job = data.job || {};
+    var plan = data.plan || {};
+    var items = data.items || [];
+    currentPlanId = plan.id || job.plan_id || currentPlanId;
+    document.getElementById('job-status').hidden = false;
+    document.getElementById('job-status-body').innerHTML =
+      '任务 <span class="path">' + C.esc(job.id || currentJobId) + '</span> · ' + C.statusTag(job.status) +
+      ' · 开始 ' + C.fmtTime(job.started_at) + (job.finished_at ? ' · 结束 ' + C.fmtTime(job.finished_at) : '');
+    if (items.length) {
+      document.getElementById('plan-section').hidden = false;
+      document.getElementById('plan-summary').textContent =
+        '共 ' + items.length + ' 项' + (plan.summary ? ' · ' + JSON.stringify(plan.summary) : '');
+      document.getElementById('plan-body').innerHTML = items.map(function (it) {
+        return '<tr><td class="path">' + C.esc(it.src_path || it.src || '') + '</td>' +
+          '<td class="path">' + C.esc(it.dst_path || it.dst || '') + '</td>' +
+          '<td>' + C.esc(it.category || '—') + '</td>' +
+          '<td>' + C.confBar(it.confidence) + '</td>' +
+          '<td>' + C.esc(it.action || '—') + '</td>' +
+          '<td>' + C.statusTag(it.status) + '</td></tr>';
+      }).join('');
+    }
+    return job;
+  }
+
+  function watchJob(jobId) {
+    currentJobId = jobId;
+    if (stopPoll) stopPoll();
+    stopPoll = C.poll(async function () {
+      var data = await C.api('/api/jobs/' + encodeURIComponent(jobId));
+      var job = renderPlan(data);
+      var st = (job.status || '').toLowerCase();
+      var finished = ['done', 'failed', 'rolled_back'].indexOf(st) >= 0;
+      if (finished) {
+        var summary = job.summary ? JSON.stringify(job.summary, null, 2) : '任务已结束，状态：' + job.status;
+        if (st === 'done' && (data.items || []).length) {
+          document.getElementById('report-section').hidden = false;
+          document.getElementById('report-body').innerHTML = '<pre class="json">' + C.esc(summary) + '</pre>';
+        }
+        loadHistory();
+      }
+      return finished;
+    }, { intervalMs: 2000 });
+  }
+
+  document.getElementById('job-form').addEventListener('submit', async function (ev) {
+    ev.preventDefault();
+    var root = document.getElementById('f-root').value.trim();
+    var library = document.getElementById('f-library').value;
+    if (!root && !library) { C.toast('请填写目录路径或选择一个库', true); return; }
+    var body = {
+      dry_run: document.getElementById('f-dry-run').checked,
+      use_llm: document.getElementById('f-llm').checked,
+      use_sem: document.getElementById('f-sem').checked,
+      rename: document.getElementById('f-rename').checked
+    };
+    if (root) body.root = root;
+    if (library) body.library = library;
+    try {
+      var res = await C.api('/api/jobs', { method: 'POST', body: body });
+      document.getElementById('plan-section').hidden = true;
+      document.getElementById('report-section').hidden = true;
+      C.toast('任务已发起：' + res.job_id);
+      watchJob(res.job_id);
+    } catch (e) {
+      C.showError(document.getElementById('job-error'), e);
+    }
+  });
+
+  document.getElementById('btn-apply').addEventListener('click', async function () {
+    if (!currentPlanId) { C.toast('没有可执行的计划', true); return; }
+    this.disabled = true;
+    try {
+      var res = await C.api('/api/jobs/' + encodeURIComponent(currentPlanId) + '/apply', { method: 'POST', body: {} });
+      C.toast('已提交执行，任务：' + res.job_id);
+      watchJob(res.job_id);
+    } catch (e) {
+      C.toast('执行失败：' + e.message, true);
+    } finally {
+      this.disabled = false;
+    }
+  });
+
+  document.getElementById('btn-rollback').addEventListener('click', async function () {
+    if (!currentPlanId) { C.toast('没有可回滚的计划', true); return; }
+    if (!confirm('确定回滚本次执行吗？文件将按操作记录逆序移回。')) return;
+    this.disabled = true;
+    try {
+      var res = await C.api('/api/jobs/' + encodeURIComponent(currentPlanId) + '/rollback', { method: 'POST', body: {} });
+      C.toast('回滚任务已发起：' + res.job_id);
+      watchJob(res.job_id);
+    } catch (e) {
+      C.toast('回滚失败：' + e.message, true);
+    } finally {
+      this.disabled = false;
+    }
+  });
+
+  document.getElementById('jobs-body').addEventListener('click', function (ev) {
+    var btn = ev.target.closest('.btn-view-job');
+    if (!btn) return;
+    watchJob(btn.getAttribute('data-id'));
+    document.getElementById('job-status').scrollIntoView({ behavior: 'smooth' });
+  });
+
+  loadHistory();
+})();
+</script>
+{% endblock %}

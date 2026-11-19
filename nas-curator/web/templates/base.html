@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}NAS Curator{% endblock %} · NAS Curator 文件管家</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="container topbar-inner">
+    <a class="brand" href="/">NAS Curator <span class="brand-sub">文件管家</span></a>
+    <nav class="nav" aria-label="主导航">
+      <a href="/" data-nav="index">总览</a>
+      <a href="/review" data-nav="review">复核 <span class="badge" id="review-badge" hidden>0</span></a>
+      <a href="/jobs" data-nav="jobs">任务</a>
+      <a href="/browse" data-nav="browse">浏览</a>
+      <a href="/rules" data-nav="rules">规则</a>
+      <a href="/settings" data-nav="settings">设置</a>
+    </nav>
+  </div>
+</header>
+<main class="container">
+  {% block content %}{% endblock %}
+</main>
+<footer class="container footer">
+  <span>NAS Curator · 高置信自动执行，低置信进复核；绝不删原件，执行可回滚。</span>
+</footer>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+<script src="/static/app.js"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

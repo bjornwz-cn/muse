@@ -1,0 +1,90 @@
+{
+  "comment": "NAS Curator 库与入口映射（2026-11-19 王震定：一个统一收件箱 + 任意选择处理，不设三个收件区；笔记本备份为输入源）。",
+  "deferred": [],
+  "excluded": [
+    {
+      "path": "/vol1/1000/下载/Wangzhen-Mac/muse",
+      "reason": "muse 工作文件夹（王震指定下载/生成的文件存此处），整理时排除，避免正在进行的工作被移走"
+    },
+    {
+      "path": "/vol1/1000/下载/AI模型",
+      "reason": "模型文件，不动"
+    },
+    {
+      "path": "/vol1/1000/_统一分析报告",
+      "reason": "报告区，不动"
+    },
+    {
+      "path": "/vol1/1000/ocr-service",
+      "reason": "服务目录，不动"
+    },
+    {
+      "path": "/vol1/1000/下载/压缩包",
+      "reason": "压缩包日后单独处理"
+    }
+  ],
+  "inbox": {
+    "notes": "唯一投递入口；任何文件丢进去，App 判断归工作/家庭/媒体哪一类再归位；用户不用事先判断文件属于哪个库。目录尚未创建（P3 部署时建）；inbox 命令遇缺失目录时报空、不建目录",
+    "path": "/vol1/1000/收件箱",
+    "scan_interval_minutes": 30,
+    "settle_minutes": 3
+  },
+  "input_sources": [
+    {
+      "id": "mac-backup",
+      "kind": "mixed",
+      "name": "笔记本备份",
+      "notes": "Mac → NAS 只上传单向同步，NAS 侧整理不会回写到 Mac；可整目录选中处理，也可定时扫描新增文件，分类后归位到工作/家庭/媒体三个库；其中 muse/ 子目录排除",
+      "root": "/vol1/1000/下载/Wangzhen-Mac",
+      "targets": [
+        "work",
+        "family",
+        "media"
+      ]
+    }
+  ],
+  "libraries": [
+    {
+      "first_level": "业务线",
+      "id": "work",
+      "kind": "document",
+      "legacy_inbox": "/vol1/1000/工作文件/收件箱",
+      "name": "工作",
+      "notes": "结构：1-王震 / 2-上海润心 / 归档 / 收件箱；库内原有收件箱不再作为入口（保留目录不动，里面的文件可移入统一收件箱处理）",
+      "root": "/vol1/1000/工作文件",
+      "rules": "baijing-supply-v8"
+    },
+    {
+      "first_level": "人",
+      "id": "family",
+      "kind": "document",
+      "name": "家庭",
+      "notes": "按人分是既定结构（刘音 / 王子婴 / 王子轩 / 王现琦 / 王震 / 韩红）；第一级是人，第二级才是事项/类型",
+      "root": "/vol1/1000/家庭文件",
+      "rules": "family-default"
+    },
+    {
+      "first_level": "媒介类型",
+      "id": "media",
+      "kind": "media",
+      "legacy_inbox": "/vol1/1000/媒体库/_收件箱",
+      "name": "媒体",
+      "notes": "结构：图书 / 影音 / _整理 / 照片 / 视频 / 音乐；媒体引擎只处理照片/视频，不得误伤图书/音乐；库内原有 _收件箱不再作为入口（保留目录不动；注：2026-11-19 实测该目录实际不存在）",
+      "root": "/vol1/1000/媒体库",
+      "rules": "media-default"
+    }
+  ],
+  "thresholds": {
+    "auto": 0.85,
+    "prescreen_margin": 0.1,
+    "prescreen_sim": 0.75,
+    "review_suggest": 0.6
+  },
+  "version": 2,
+  "model_endpoints": {
+    "llm_host": "http://172.17.0.1:11434",
+    "sem_host": "http://172.17.0.1:11500",
+    "ocr_url": "http://172.17.0.1:8866"
+  },
+  "auto_apply": true
+}

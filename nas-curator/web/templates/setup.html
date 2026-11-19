@@ -1,0 +1,195 @@
+{% extends "base.html" %}
+{% block title %}首次安装向导{% endblock %}
+{% block content %}
+<h1>首次安装向导</h1>
+<p class="lead">三步完成初始设置。默认值按 NAS 现状填好，确认无误直接点「下一步」即可；以后改库路径须手动编辑配置文件，阈值与开关可在设置页改。</p>
+
+<div id="setup-error"></div>
+
+<div class="steps" id="steps-nav" style="margin:12px 0">
+  <span class="step active" data-step="1">① 库路径</span>
+  <span class="step" data-step="2">② 模型端点</span>
+  <span class="step" data-step="3">③ 定时与自动执行</span>
+</div>
+
+<form id="setup-form">
+  <!-- 第一步：库路径 -->
+  <section data-pane="1">
+    <h2>库路径</h2>
+    <p class="muted">三大库的物理根目录不变；统一收件箱是唯一投递入口；笔记本备份是输入源（只上传，NAS 侧整理安全）。</p>
+    <div id="libs-fields"></div>
+    <div class="form-row">
+      <div class="field">
+        <label for="w-inbox">统一收件箱</label>
+        <input type="text" id="w-inbox" value="/vol1/1000/收件箱">
+      </div>
+      <div class="field">
+        <label for="w-mac">笔记本备份（输入源）</label>
+        <input type="text" id="w-mac" value="/vol1/1000/下载/Wangzhen-Mac">
+      </div>
+    </div>
+  </section>
+
+  <!-- 第二步：模型端点 -->
+  <section data-pane="2" hidden>
+    <h2>模型端点</h2>
+    <p class="muted">容器内用宿主网关地址连 NAS 上的模型服务（127.0.0.1 指容器自身，不可用）。火山 key 可选填，不填则只用本地模型；key 只存入数据卷的 .env.local（600），页面只显掩码。</p>
+    <div class="form-row">
+      <div class="field">
+        <label for="w-llm">LLM（ollama-cpu，qwen3:4b）</label>
+        <input type="text" id="w-llm" value="http://172.17.0.1:11434">
+      </div>
+      <div class="field">
+        <label for="w-sem">语义向量（ollama-gpu，bge-m3）</label>
+        <input type="text" id="w-sem" value="http://172.17.0.1:11500">
+      </div>
+      <div class="field">
+        <label for="w-ocr">OCR 服务</label>
+        <input type="text" id="w-ocr" value="http://172.17.0.1:8866">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="field">
+        <label for="w-key-plan">火山 Ark Plan key（可选）</label>
+        <input type="password" id="w-key-plan" placeholder="留空则不用火山 Plan" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="w-key-payg">火山按量付费 key（可选）</label>
+        <input type="password" id="w-key-payg" placeholder="留空则不用按量付费" autocomplete="off">
+      </div>
+    </div>
+  </section>
+
+  <!-- 第三步：定时与自动执行 -->
+  <section data-pane="3" hidden>
+    <h2>定时任务与自动执行</h2>
+    <label class="check"><input type="checkbox" id="w-auto-apply" checked> auto_apply：收件箱高置信计划自动确认执行</label>
+    <div class="form-row">
+      <div class="field">
+        <label for="w-scan">收件箱扫描间隔（分钟）</label>
+        <input type="number" id="w-scan" min="1" step="1" value="30">
+      </div>
+      <div class="field">
+        <label for="w-settle">投递稳定等待 settle（分钟）</label>
+        <input type="number" id="w-settle" min="0" step="1" value="3">
+      </div>
+      <div class="field">
+        <label for="w-threshold">自动执行阈值（0–1，默认 0.85）</label>
+        <input type="number" id="w-threshold" min="0" max="1" step="0.05" value="0.85">
+      </div>
+      <div class="field">
+        <label for="w-review-suggest">复核建议阈值（0–1，默认 0.60）</label>
+        <input type="number" id="w-review-suggest" min="0" max="1" step="0.05" value="0.60">
+      </div>
+    </div>
+    <p class="muted">置信度 ≥ 自动执行阈值：自动分类、改名、打标签、归位（可回滚）；0.60–0.85 进复核附建议；&lt; 0.60 进复核无建议。</p>
+  </section>
+
+  <div class="btn-row" style="margin-top:16px">
+    <button type="button" class="btn ghost" id="w-prev" hidden>上一步</button>
+    <button type="button" class="btn" id="w-next">下一步</button>
+    <button type="submit" class="btn" id="w-finish" hidden>完成设置，进总览</button>
+  </div>
+</form>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  'use strict';
+  var step = 1;
+  var settings = null;
+  var $ = function (id) { return document.getElementById(id); };
+
+  function showStep(n) {
+    step = n;
+    document.querySelectorAll('[data-pane]').forEach(function (el) {
+      el.hidden = el.getAttribute('data-pane') !== String(n);
+    });
+    document.querySelectorAll('#steps-nav .step').forEach(function (el) {
+      el.classList.toggle('active', el.getAttribute('data-step') === String(n));
+    });
+    $('w-prev').hidden = n === 1;
+    $('w-next').hidden = n === 3;
+    $('w-finish').hidden = n !== 3;
+  }
+
+  function showError(msg) {
+    $('setup-error').innerHTML = '<div class="error">' + msg + '</div>';
+  }
+
+  function fillFromSettings(s) {
+    settings = s;
+    var libs = s.libraries || [];
+    $('libs-fields').innerHTML = libs.map(function (lib) {
+      return '<div class="field"><label>' + lib.name + '库（' + lib.id + '）</label>' +
+        '<input type="text" data-lib="' + lib.id + '" value="' + lib.root + '"></div>';
+    }).join('');
+    if (s.inbox && s.inbox.path) $('w-inbox').value = s.inbox.path;
+    var src = (s.input_sources || []).find(function (x) { return x.id === 'mac-backup'; });
+    if (src && src.root) $('w-mac').value = src.root;
+    var me = s.model_endpoints || {};
+    if (me.llm_host) $('w-llm').value = me.llm_host;
+    if (me.sem_host) $('w-sem').value = me.sem_host;
+    if (me.ocr_url) $('w-ocr').value = me.ocr_url;
+    var sc = s.schedule || {};
+    if (sc.inbox_scan_minutes) $('w-scan').value = sc.inbox_scan_minutes;
+    if (sc.settle_minutes != null) $('w-settle').value = sc.settle_minutes;
+    var th = s.thresholds || {};
+    if (th.auto != null) $('w-threshold').value = th.auto;
+    if (th.review_suggest != null) $('w-review-suggest').value = th.review_suggest;
+    $('w-auto-apply').checked = !!s.auto_apply;
+  }
+
+  fetch('/api/setup').then(function (r) { return r.json(); }).then(function (d) {
+    if (d.settings) fillFromSettings(d.settings);
+    if (d.setup_done) window.location.href = '/';
+  }).catch(function () { /* 默认值已填好，离线也能走完向导 */ });
+
+  $('w-prev').addEventListener('click', function () { showStep(step - 1); });
+  $('w-next').addEventListener('click', function () { showStep(step + 1); });
+
+  $('setup-form').addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    var libs = [];
+    document.querySelectorAll('[data-lib]').forEach(function (el) {
+      libs.push({ id: el.getAttribute('data-lib'), root: el.value.trim() });
+    });
+    var keys = {};
+    var kp = $('w-key-plan').value.trim();
+    var ky = $('w-key-payg').value.trim();
+    if (kp) keys.ark_plan = kp;
+    if (ky) keys.ark_payg = ky;
+    var body = {
+      libraries: libs,
+      inbox: {
+        path: $('w-inbox').value.trim(),
+        scan_interval_minutes: parseInt($('w-scan').value, 10) || 30,
+        settle_minutes: parseInt($('w-settle').value, 10) || 0
+      },
+      input_sources: [{ id: 'mac-backup', root: $('w-mac').value.trim() }],
+      model_endpoints: {
+        llm_host: $('w-llm').value.trim(),
+        sem_host: $('w-sem').value.trim(),
+        ocr_url: $('w-ocr').value.trim()
+      },
+      thresholds: {
+        auto: parseFloat($('w-threshold').value) || 0.85,
+        review_suggest: parseFloat($('w-review-suggest').value) || 0.60
+      },
+      auto_apply: $('w-auto-apply').checked,
+      keys: keys
+    };
+    fetch('/api/setup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+    .then(function (res) {
+      if (!res.ok) { showError(res.d.detail || '保存失败'); return; }
+      window.location.href = '/';
+    }).catch(function (e) { showError('保存失败：' + e); });
+  });
+})();
+</script>
+{% endblock %}

@@ -1,0 +1,1 @@
+{"data-share":{"shares":[{"name":"nas-curator","permission":{"rw":["docker-nas-curator"]}},{"name":"nas-curator/data","permission":{"rw":["docker-nas-curator"]}}]},"docker-project":{"projects":[{"name":"nas-curator","path":"docker"}]}}

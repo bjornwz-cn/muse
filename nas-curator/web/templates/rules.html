@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}规则{% endblock %}
+{% block content %}
+<h1>规则</h1>
+<p class="lead">三组规则只读查看；阈值可编辑保存。规则改动即生效，历史计划记录用的是当时的规则版本。</p>
+
+<div id="rules-error"></div>
+
+<h2>阈值设置</h2>
+<form id="threshold-form">
+  <div class="form-row">
+    <div class="field">
+      <label for="t-auto">auto（自动执行阈值，≥ 此值自动执行）</label>
+      <input type="number" id="t-auto" step="0.01" min="0" max="1" value="0.85">
+    </div>
+    <div class="field">
+      <label for="t-review">review_suggest（附建议的复核下限）</label>
+      <input type="number" id="t-review" step="0.01" min="0" max="1" value="0.60">
+    </div>
+    <div class="field">
+      <label for="t-sim">prescreen_sim（预筛相似度阈值）</label>
+      <input type="number" id="t-sim" step="0.01" min="0" max="1" value="0.75">
+    </div>
+    <div class="field">
+      <label for="t-margin">prescreen_margin（预筛与第二名差值阈值）</label>
+      <input type="number" id="t-margin" step="0.01" min="0" max="1" value="0.10">
+    </div>
+  </div>
+  <div class="btn-row">
+    <button class="btn" type="submit">保存阈值</button>
+    <span class="muted">保存调 PUT /api/settings {thresholds}（联调已确认：后端 rules 路由只接受 work/family/media）。</span>
+  </div>
+</form>
+
+<h2>规则详情（只读）</h2>
+<details open>
+  <summary>工作规则（work）</summary>
+  <pre class="json" id="rules-work">加载中…</pre>
+</details>
+<details>
+  <summary>家庭规则（family）</summary>
+  <pre class="json" id="rules-family">加载中…</pre>
+</details>
+<details>
+  <summary>媒体规则（media）</summary>
+  <pre class="json" id="rules-media">加载中…</pre>
+</details>
+{% endblock %}
+{% block scripts %}
+<script>
+(function () {
+  var C = window.Curator;
+  async function load() {
+    try {
+      var d = await C.api('/api/rules');
+      var t = d.thresholds || {};
+      if (t.auto != null) document.getElementById('t-auto').value = t.auto;
+      if (t.review_suggest != null) document.getElementById('t-review').value = t.review_suggest;
+      if (t.prescreen_sim != null) document.getElementById('t-sim').value = t.prescreen_sim;
+      if (t.prescreen_margin != null) document.getElementById('t-margin').value = t.prescreen_margin;
+      document.getElementById('rules-work').textContent = JSON.stringify(d.work || {}, null, 2);
+      document.getElementById('rules-family').textContent = JSON.stringify(d.family || {}, null, 2);
+      document.getElementById('rules-media').textContent = JSON.stringify(d.media || {}, null, 2);
+    } catch (e) {
+      C.showError(document.getElementById('rules-error'), e);
+    }
+  }
+  document.getElementById('threshold-form').addEventListener('submit', async function (ev) {
+    ev.preventDefault();
+    var payload = {
+      auto: parseFloat(document.getElementById('t-auto').value),
+      review_suggest: parseFloat(document.getElementById('t-review').value),
+      prescreen_sim: parseFloat(document.getElementById('t-sim').value),
+      prescreen_margin: parseFloat(document.getElementById('t-margin').value)
+    };
+    try {
+      await C.api('/api/settings', { method: 'PUT', body: { thresholds: payload } });
+      C.toast('阈值已保存');
+    } catch (e) {
+      C.toast('保存失败：' + e.message, true);
+    }
+  });
+  load();
+})();
+</script>
+{% endblock %}

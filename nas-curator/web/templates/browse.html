@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+{% block title %}浏览{% endblock %}
+{% block content %}
+<h1>浏览</h1>
+<p class="lead">按分类树浏览，按标签筛选，按文件名或正文关键词搜索；点一行看文件详情。</p>
+
+<form id="browse-form">
+  <div class="form-row">
+    <div class="field">
+      <label for="f-dir">目录路径</label>
+      <input type="text" id="f-dir" placeholder="/vol1/1000/工作文件">
+    </div>
+    <div class="field">
+      <label for="f-tag">标签筛选</label>
+      <input type="text" id="f-tag" placeholder="如：合同">
+    </div>
+    <div class="field">
+      <label for="f-q">搜索（文件名 / 正文）</label>
+      <input type="text" id="f-q" placeholder="关键词">
+    </div>
+  </div>
+  <div class="btn-row">
+    <button class="btn" type="submit">搜索</button>
+    <span class="muted">分类树：</span>
+    <button class="btn ghost small tree-btn" type="button" data-dir="/vol1/1000/工作文件">工作</button>
+    <button class="btn ghost small tree-btn" type="button" data-dir="/vol1/1000/家庭文件">家庭</button>
+    <button class="btn ghost small tree-btn" type="button" data-dir="/vol1/1000/媒体库">媒体</button>
+    <button class="btn ghost small tree-btn" type="button" data-dir="/vol1/1000/收件箱">统一收件箱</button>
+    <button class="btn ghost small tree-btn" type="button" data-dir="/vol1/1000/下载/Wangzhen-Mac">笔记本备份</button>
+  </div>
+</form>
+
+<div id="browse-error" style="margin-top:12px"></div>
+<div class="table-wrap" style="margin-top:12px">
+  <table>
+    <thead><tr><th>文件</th><th>大小</th><th>修改时间</th><th>类型</th><th>分类</th><th>标签</th></tr></thead>
+    <tbody id="browse-body"><tr><td colspan="6" class="muted">输入目录、标签或关键词后点搜索。</td></tr></tbody>
+  </table>
+</div>
+
+<div id="modal-root"></div>
+{% endblock %}
+{% block scripts %}
+<script>
+(function () {
+  var C = window.Curator;
+  var body = document.getElementById('browse-body');
+
+  async function search() {
+    var dir = document.getElementById('f-dir').value.trim();
+    var tag = document.getElementById('f-tag').value.trim();
+    var q = document.getElementById('f-q').value.trim();
+    var params = new URLSearchParams({ limit: '100' });
+    if (dir) params.set('dir', dir);
+    if (tag) params.set('tag', tag);
+    if (q) params.set('q', q);
+    body.innerHTML = '<tr><td colspan="6" class="muted">加载中…</td></tr>';
+    try {
+      var d = await C.api('/api/browse?' + params.toString());
+      var entries = d.entries || [];
+      body.innerHTML = entries.length ? entries.map(function (e) {
+        return '<tr class="clickable" data-path="' + C.esc(e.path) + '">' +
+          '<td class="path">' + C.esc(e.name || e.path) + '</td>' +
+          '<td class="nowrap">' + C.fmtBytes(e.size) + '</td>' +
+          '<td class="nowrap">' + C.fmtTime(e.mtime) + '</td>' +
+          '<td>' + C.esc(e.kind || '—') + '</td>' +
+          '<td>' + C.esc(e.category || '—') + '</td>' +
+          '<td>' + (e.tags || []).map(function (t) { return '<span class="tag">' + C.esc(t) + '</span>'; }).join(' ') + '</td></tr>';
+      }).join('') : '<tr><td colspan="6" class="muted">没有找到匹配的文件</td></tr>';
+    } catch (e) {
+      C.showError(document.getElementById('browse-error'), e);
+      body.innerHTML = '';
+    }
+  }
+
+  async function showDetail(path) {
+    var root = document.getElementById('modal-root');
+    root.innerHTML = '<div class="modal-backdrop"><div class="modal"><p class="loading">加载详情…</p></div></div>';
+    try {
+      var d = await C.api('/api/browse/file?path=' + encodeURIComponent(path));
+      var history = (d.history || []).map(function (h) {
+        return '<li>' + C.esc(typeof h === 'string' ? h : JSON.stringify(h)) + '</li>';
+      }).join('');
+      root.innerHTML = '<div class="modal-backdrop"><div class="modal" role="dialog" aria-modal="true">' +
+        '<h2 class="path">' + C.esc(d.path || path) + '</h2>' +
+        '<dl class="kv">' +
+        '<dt>大小</dt><dd>' + C.fmtBytes(d.size) + '</dd>' +
+        '<dt>修改时间</dt><dd>' + C.fmtTime(d.mtime) + '</dd>' +
+        '<dt>SHA256</dt><dd class="path">' + C.esc(d.sha256 || '—') + '</dd>' +
+        '<dt>分类</dt><dd>' + C.esc(d.category || '—') + '</dd>' +
+        '<dt>分类依据</dt><dd>' + C.esc(d.reason || '—') + '</dd>' +
+        '<dt>证据片段</dt><dd>' + C.esc(d.evidence || '—') + '</dd>' +
+        '<dt>标签</dt><dd>' + (d.tags || []).map(function (t) { return '<span class="tag">' + C.esc(t) + '</span>'; }).join(' ') + '</dd>' +
+        '</dl>' +
+        '<h2 style="margin-top:16px">历史操作</h2>' +
+        (history ? '<ul>' + history + '</ul>' : '<p class="muted">暂无历史操作记录</p>') +
+        '<div class="btn-row" style="margin-top:16px"><button class="btn" id="modal-close" type="button">关闭</button></div>' +
+        '</div></div>';
+      document.getElementById('modal-close').addEventListener('click', function () { root.innerHTML = ''; });
+      root.querySelector('.modal-backdrop').addEventListener('click', function (ev) {
+        if (ev.target === ev.currentTarget) root.innerHTML = '';
+      });
+    } catch (e) {
+      root.innerHTML = '<div class="modal-backdrop"><div class="modal"><p class="error">详情加载失败：' +
+        C.esc(e.message) + '</p><div class="btn-row"><button class="btn" onclick="document.getElementById(\'modal-root\').innerHTML=\'\'" type="button">关闭</button></div></div></div>';
+    }
+  }
+
+  document.getElementById('browse-form').addEventListener('submit', function (ev) { ev.preventDefault(); search(); });
+  document.querySelectorAll('.tree-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      document.getElementById('f-dir').value = btn.getAttribute('data-dir');
+      search();
+    });
+  });
+  body.addEventListener('click', function (ev) {
+    var tr = ev.target.closest('tr[data-path]');
+    if (tr) showDetail(tr.getAttribute('data-path'));
+  });
+})();
+</script>
+{% endblock %}

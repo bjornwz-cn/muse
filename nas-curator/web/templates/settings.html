@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+{% block title %}设置{% endblock %}
+{% block content %}
+<h1>设置</h1>
+<p class="lead">库路径与模型端点只读；自动执行开关与定时可编辑；火山 key 只存掩码、不回显明文。</p>
+
+<div id="settings-error"></div>
+
+<h2>库与收件箱（只读）</h2>
+<div class="table-wrap">
+  <table>
+    <thead><tr><th>名称</th><th>路径</th><th>说明</th></tr></thead>
+    <tbody id="libs-body"><tr><td colspan="3" class="muted">加载中…</td></tr></tbody>
+  </table>
+</div>
+<p class="muted" id="inbox-line" style="margin-top:8px"></p>
+
+<h2>模型端点（只读）</h2>
+<pre class="json" id="endpoints-pre">加载中…</pre>
+
+<h2>自动执行与定时</h2>
+<form id="settings-form">
+  <label class="check"><input type="checkbox" id="s-auto-apply"> auto_apply：高置信计划自动确认执行</label>
+  <div class="form-row">
+    <div class="field">
+      <label for="s-scan">收件箱扫描间隔（分钟）</label>
+      <input type="number" id="s-scan" min="1" step="1" value="30">
+    </div>
+    <div class="field">
+      <label for="s-settle">投递稳定等待 settle（分钟）</label>
+      <input type="number" id="s-settle" min="0" step="1" value="3">
+    </div>
+  </div>
+  <div class="btn-row">
+    <button class="btn" type="submit">保存设置</button>
+    <span class="muted">保存调 PUT /api/settings。</span>
+  </div>
+</form>
+
+<h2>火山模型 Key</h2>
+<form id="key-form">
+  <div class="field">
+    <label for="k-provider">服务方</label>
+    <select id="k-provider">
+      <option value="ark-plan">火山 Ark Plan</option>
+      <option value="ark-payg">火山 Ark PAYG</option>
+    </select>
+  </div>
+  <div class="field">
+    <label for="k-key">Key（password 类型，提交后只显示掩码）</label>
+    <input type="password" id="k-key" autocomplete="new-password" placeholder="输入后提交，页面不回显明文">
+  </div>
+  <div class="btn-row">
+    <button class="btn" type="submit">保存 Key</button>
+    <span class="muted" id="key-masked"></span>
+  </div>
+</form>
+{% endblock %}
+{% block scripts %}
+<script>
+(function () {
+  var C = window.Curator;
+  async function load() {
+    try {
+      var d = await C.api('/api/settings');
+      var libs = d.libraries || [];
+      document.getElementById('libs-body').innerHTML = libs.length ? libs.map(function (l) {
+        return '<tr><td>' + C.esc(l.name || l.id) + '</td><td class="path">' + C.esc(l.root || '') + '</td>' +
+          '<td>' + C.esc(l.notes || '') + '</td></tr>';
+      }).join('') : '<tr><td colspan="3" class="muted">暂无库信息</td></tr>';
+      var inbox = d.inbox || {};
+      document.getElementById('inbox-line').textContent =
+        '统一收件箱：' + (inbox.path || '—') + (inbox.scan_interval_minutes != null ? ' · 每 ' + inbox.scan_interval_minutes + ' 分钟扫描' : '');
+      document.getElementById('endpoints-pre').textContent = JSON.stringify(d.model_endpoints || {}, null, 2);
+      if (d.auto_apply != null) document.getElementById('s-auto-apply').checked = !!d.auto_apply;
+      var sch = d.schedule || {};
+      if (sch.inbox_scan_minutes != null) document.getElementById('s-scan').value = sch.inbox_scan_minutes;
+      else if (inbox.scan_interval_minutes != null) document.getElementById('s-scan').value = inbox.scan_interval_minutes;
+      if (sch.settle_minutes != null) document.getElementById('s-settle').value = sch.settle_minutes;
+      else if (inbox.settle_minutes != null) document.getElementById('s-settle').value = inbox.settle_minutes;
+    } catch (e) {
+      C.showError(document.getElementById('settings-error'), e);
+    }
+  }
+  document.getElementById('settings-form').addEventListener('submit', async function (ev) {
+    ev.preventDefault();
+    var body = {
+      auto_apply: document.getElementById('s-auto-apply').checked,
+      schedule: {
+        inbox_scan_minutes: parseInt(document.getElementById('s-scan').value, 10),
+        settle_minutes: parseInt(document.getElementById('s-settle').value, 10)
+      }
+    };
+    try {
+      await C.api('/api/settings', { method: 'PUT', body: body });
+      C.toast('设置已保存');
+    } catch (e) {
+      C.toast('保存失败：' + e.message, true);
+    }
+  });
+  document.getElementById('key-form').addEventListener('submit', async function (ev) {
+    ev.preventDefault();
+    var key = document.getElementById('k-key').value;
+    if (!key) { C.toast('请先输入 Key', true); return; }
+    try {
+      var res = await C.api('/api/settings/key', {
+        method: 'POST',
+        body: { provider: document.getElementById('k-provider').value, key: key }
+      });
+      document.getElementById('k-key').value = '';
+      document.getElementById('key-masked').textContent =
+        '已保存：' + (res.masked || res.mask || '••••••••');
+      C.toast('Key 已保存（仅显示掩码）');
+    } catch (e) {
+      C.toast('保存失败：' + e.message, true);
+    }
+  });
+  load();
+})();
+</script>
+{% endblock %}

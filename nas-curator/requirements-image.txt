@@ -1,0 +1,17 @@
+# NAS Curator 镜像 Python 依赖（供 Dockerfile 用）。
+# transformers 钉 4.57.1（4.x 末期，ChineseCLIPModel/Processor 稳定；5.x 有破坏性变更，
+#  且 P1 实测用的是 marvis 环境的 4.x）；opencv 钉 4.10.0.84（4.x 稳定版）。
+torch
+open-clip-torch
+transformers==4.57.1
+opencv-python-headless==4.10.0.84
+fastapi==0.165.0
+uvicorn==0.54.0
+Jinja2==3.1.6
+httpx==0.28.1
+pillow==13.0.0
+requests==2.34.2
+pillow-heif
+openpyxl
+olefile
+numpy

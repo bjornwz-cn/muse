@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}总览{% endblock %}
+{% block content %}
+<h1>总览</h1>
+<p class="lead">三库状态、今日新增、复核待处理与最近任务。</p>
+
+<div id="dash-error"></div>
+
+<section aria-label="三库">
+  <div class="cards" id="library-cards"><p class="loading">加载中…</p></div>
+</section>
+
+<section aria-label="今日与重复">
+  <div class="cards" style="margin-top:12px">
+    <div class="card">
+      <h3>复核待处理</h3>
+      <div class="big" id="stat-review">—</div>
+      <div class="meta"><a href="/review">去复核队列 →</a></div>
+    </div>
+    <div class="card">
+      <h3>今日新增</h3>
+      <div class="big" id="stat-today">—</div>
+      <div class="meta">今日新登记文件数</div>
+    </div>
+    <div class="card">
+      <h3>重复可回收</h3>
+      <div class="big" id="stat-dup">—</div>
+      <div class="meta" id="stat-dup-count">—</div>
+    </div>
+  </div>
+</section>
+
+<h2>最近任务</h2>
+<div class="table-wrap">
+  <table>
+    <thead><tr><th>任务</th><th>类型</th><th>状态</th><th>开始</th><th>结束</th></tr></thead>
+    <tbody id="jobs-body"><tr><td colspan="5" class="muted">加载中…</td></tr></tbody>
+  </table>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+(function () {
+  var C = window.Curator;
+  async function load() {
+    try {
+      var d = await C.api('/api/dashboard');
+      var cards = (d.libraries || []).map(function (lib) {
+        return '<div class="card"><h3>' + C.esc(lib.name) + '</h3>' +
+          '<div class="stat-row"><div class="stat"><b>' + C.fmtNum(lib.files) + '</b><span class="meta">文件</span></div>' +
+          '<div class="stat"><b>' + C.fmtBytes(lib.bytes) + '</b><span class="meta">体积</span></div>' +
+          '<div class="stat"><b>' + C.fmtNum(lib.review_pending) + '</b><span class="meta">待复核</span></div></div>' +
+          '<div class="meta">' + C.esc(lib.root || '') + '</div></div>';
+      }).join('');
+      document.getElementById('library-cards').innerHTML = cards || '<p class="empty">暂无库信息</p>';
+      document.getElementById('stat-review').textContent = C.fmtNum(d.review_pending);
+      document.getElementById('stat-today').textContent = C.fmtNum(d.today_new);
+      var dup = d.dup_reclaimable || {};
+      document.getElementById('stat-dup').textContent = C.fmtBytes(dup.bytes);
+      document.getElementById('stat-dup-count').textContent = C.fmtNum(dup.count) + ' 个重复文件';
+      var rows = (d.jobs_recent || []).map(function (j) {
+        return '<tr><td class="path">' + C.esc(j.id) + '</td><td>' + C.esc(j.kind) + '</td>' +
+          '<td>' + C.statusTag(j.status) + '</td><td class="nowrap">' + C.fmtTime(j.started_at) + '</td>' +
+          '<td class="nowrap">' + C.fmtTime(j.finished_at) + '</td></tr>';
+      }).join('');
+      document.getElementById('jobs-body').innerHTML = rows || '<tr><td colspan="5" class="muted">暂无任务</td></tr>';
+    } catch (e) {
+      C.showError(document.getElementById('dash-error'), e);
+      document.getElementById('library-cards').innerHTML = '';
+    }
+  }
+  load();
+})();
+</script>
+{% endblock %}

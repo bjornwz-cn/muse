@@ -1,0 +1,48 @@
+{
+  "library_root": "/vol1/1000/媒体库",
+  "inbox": "/vol1/1000/收件箱",
+  "review_root": "/vol1/1000/媒体库/_Review",
+  "work_dir": "/vol2/@appdata/marvis-app/data/home/agent-memory/media-curator",
+  "model_dir": "/vol2/@appdata/marvis-app/data/home/agent-memory/media-curator/models",
+  "use_sudo": true,
+  "auto_apply": true,
+  "settle_minutes": 3,
+  "max_files_per_run": 300,
+  "batch_size": 25,
+  "owner_uid": 1000,
+  "owner_gid": 1000,
+  "thresholds": {
+    "margin_min": 0.12,
+    "score_min": 0.35,
+    "blur_min": 50,
+    "phash_max_distance": 5,
+    "near_dup_enabled": true
+  },
+  "photo_dirs": {
+    "人物合影": "照片/家庭与人物/人物合影",
+    "儿童成长": "照片/家庭与人物/儿童成长",
+    "自拍": "照片/家庭与人物/自拍",
+    "旅行风景": "照片/旅行与城市/旅行风景",
+    "城市与建筑": "照片/旅行与城市/城市与建筑",
+    "日常生活": "照片/生活记录/日常生活",
+    "美食与咖啡": "照片/生活记录/美食与咖啡",
+    "宠物与动物": "照片/生活记录/宠物与动物",
+    "工作与活动": "照片/生活记录/工作与活动",
+    "屏幕截图": "照片/资料与截图/屏幕截图",
+    "文档与票据": "照片/资料与截图/文档与票据",
+    "梗图与表情": "照片/资料与截图/梗图与表情"
+  },
+  "video_dirs": {
+    "儿童成长": "视频/儿童成长",
+    "旅行风景": "视频/旅行风景",
+    "日常生活": "视频/日常生活",
+    "聚会与夜生活": "视频/聚会与夜生活",
+    "运动与活动": "视频/运动与活动",
+    "屏幕录制": "视频/屏幕录制"
+  },
+  "review_dirs": {
+    "待确认": "_Review/待确认",
+    "模糊": "_Review/模糊",
+    "疑似重复": "_Review/疑似重复"
+  }
+}
