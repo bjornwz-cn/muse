@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    package="com.bjornwz.earbuddy">
+
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- M2 同传将使用 -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 读取完整应用列表（规则页需要）；Android 11+ 包可见性要求，内部分发不上架故可用 -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <application
+        android:name=".EarApp"
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar"
+        tools:targetApi="36">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".AppRulesActivity"
+            android:exported="false"
+            android:label="播报规则" />
+
+        <activity
+            android:name=".TranslateActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:label="实时翻译" />
+
+        <activity
+            android:name=".RecordsActivity"
+            android:exported="false"
+            android:label="翻译记录" />
+
+        <activity
+            android:name=".SetupActivity"
+            android:exported="false"
+            android:label="初始化与自检" />
+
+        <service
+            android:name=".OverlayService"
+            android:exported="false" />
+
+        <!-- 实时翻译会话宿主（前台服务）：悬浮按钮直启直停，不需要打开 App -->
+        <service
+            android:name=".TranslateService"
+            android:exported="false"
+            android:stopWithTask="false"
+            android:foregroundServiceType="microphone|dataSync" />
+
+        <!-- 常驻前台服务：保活 + 状态通知 -->
+        <service
+            android:name=".KeepAliveService"
+            android:exported="false"
+            android:stopWithTask="false"
+            android:foregroundServiceType="mediaPlayback" />
+
+        <receiver
+            android:name=".RestartReceiver"
+            android:exported="false" />
+
+        <!-- 通知读取 -->
+        <service
+            android:name=".NotifyListener"
+            android:exported="false"
+            android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
+        <!-- OTA 下载的 APK 文件提供者 -->
+        <provider
+            android:name=".ApkProvider"
+            android:authorities="com.bjornwz.earbuddy.apkprovider"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+
+        <!-- 会话录音分享提供者 -->
+        <provider
+            android:name=".AudioProvider"
+            android:authorities="com.bjornwz.earbuddy.audioprovider"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+
+        <!-- 诊断日志导出提供者 -->
+        <provider
+            android:name=".LogProvider"
+            android:authorities="com.bjornwz.earbuddy.logprovider"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+            <service
+            android:name=".ProjectionService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+    </application>
+</manifest>

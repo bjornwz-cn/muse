@@ -1,6 +1,1 @@
-{
-  "versionCode": 46,
-  "versionName": "0.8.8",
-  "url": "https://raw.githubusercontent.com/bjornwz-cn/muse/main/update/earbuddy-latest.apk",
-  "notes": "“播报时降低媒体音量”做成功能开关（主界面「通知播报」卡片里，默认关）：关 = 与媒体混音同步播报，媒体音量全程不变（v0.8.7 的修法保留）；开 = 播报时压低媒体音，播完释放。焦点全流程记日志（申请/释放/播报完成/失败/看门狗），另加看门狗兜底：播报超时未收到完成回调即强制释放焦点、复位状态，媒体音量不会再被压住回不来。"
-}
+{"notes":"方向 A：日/韩流式化改造。实测火山流式 ASR 不支持日语（只出罗马音），改走流式化的一句话识别：能量 VAD 按真实停顿切段（有声≥2 秒＋静音≥0.7 秒，单段最长 6 秒），聚合器按音频时间计时，识别失败重试 1 次并记 asr_retry。仍是一句话模式，达不到真流式边说边出字；自动模式说日语仍未解。","url":"https://raw.githubusercontent.com/bjornwz-cn/muse/main/update/earbuddy-latest.apk","versionCode":47,"versionName":"0.8.9"}
