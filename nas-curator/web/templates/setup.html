@@ -46,6 +46,7 @@
       <div class="field">
         <label for="w-ocr">OCR 服务</label>
         <input type="text" id="w-ocr" value="http://172.17.0.1:8866">
+        <p class="muted" id="w-ocr-status"></p>
       </div>
     </div>
     <div class="form-row">
@@ -132,6 +133,10 @@
     if (me.llm_host) $('w-llm').value = me.llm_host;
     if (me.sem_host) $('w-sem').value = me.sem_host;
     if (me.ocr_url) $('w-ocr').value = me.ocr_url;
+    var st = s.ocr_status || {};
+    $('w-ocr-status').textContent = st.url
+      ? ('OCR 端点：' + st.url + (st.reachable ? ' · 可达（HTTP ' + st.status + '）' : ' · 不可达' + (st.error ? '（' + st.error + '）' : '')))
+      : '';
     var sc = s.schedule || {};
     if (sc.inbox_scan_minutes) $('w-scan').value = sc.inbox_scan_minutes;
     if (sc.settle_minutes != null) $('w-settle').value = sc.settle_minutes;

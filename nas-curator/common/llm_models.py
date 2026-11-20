@@ -10,6 +10,10 @@ llmkit 按 key_env 变量名从环境变量或 .env.local 取值。
 默认列表（文件不存在时）保留现有行为：
   火山 Ark Plan（Key 为空时跳过）→ 火山 Ark 按量 → 本地 Ollama（兜底）。
 文件一旦存在（用户在设置页保存过），即按文件内容原样执行，不再强制补本地兜底。
+
+0.1.3：每条加计费属性 billing（free=订阅/免费额度，payg=按量计费）；
+生效调用顺序改为三档：本地 Ollama → 免费额度云模型 → 按量云模型，
+档内保持用户列表顺序（chain_order；类型默认值见 TYPE_BILLING_DEFAULT）。
 """
 from __future__ import annotations
 
@@ -21,8 +25,14 @@ import re
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 MODEL_TYPES = ("ark-plan", "ark-payg", "ollama", "custom")
+BILLING_VALUES = ("free", "payg")
 TYPE_LABELS = {"ark-plan": "火山 Ark Plan", "ark-payg": "火山 Ark 按量",
                "ollama": "本地 Ollama", "custom": "自定义 OpenAI 兼容"}
+# 计费类型默认值：ark-plan 是订阅（含免费额度）→ free；ark-payg 按量 → payg；
+# 本地 Ollama 不花钱 → free；自定义默认按量，用户可在设置页标为 free。
+TYPE_BILLING_DEFAULT = {"ark-plan": "free", "ark-payg": "payg",
+                        "ollama": "free", "custom": "payg"}
+BILLING_LABELS = {"free": "免费额度", "payg": "按量计费"}
 
 ARK_BASE_PLAN = "https://ark.cn-beijing.volces.com/api/plan/v3"
 ARK_BASE_PAYG = "https://ark.cn-beijing.volces.com/api/v3"
@@ -36,13 +46,14 @@ DEFAULT_KEY_ENV = {"ark-plan": "ARK_PLAN_KEY", "ark-payg": "ARK_PAYG_KEY"}
 DEFAULT_MODELS = [
     {"id": "ark-plan", "name": "火山 Ark Plan", "type": "ark-plan",
      "model": DEFAULT_ARK_MODEL, "base_url": ARK_BASE_PLAN,
-     "key_env": "ARK_PLAN_KEY", "enabled": True},
+     "key_env": "ARK_PLAN_KEY", "enabled": True, "billing": "free"},
     {"id": "ark-payg", "name": "火山 Ark 按量", "type": "ark-payg",
      "model": DEFAULT_ARK_MODEL, "base_url": ARK_BASE_PAYG,
-     "key_env": "ARK_PAYG_KEY", "enabled": True},
+     "key_env": "ARK_PAYG_KEY", "enabled": True, "billing": "payg"},
     {"id": "local", "name": "本地 Ollama", "type": "ollama",
      "model": DEFAULT_OLLAMA_MODEL, "base_url": DEFAULT_OLLAMA_HOST,
-     "embed_model": DEFAULT_EMBED_MODEL, "key_env": "", "enabled": True},
+     "embed_model": DEFAULT_EMBED_MODEL, "key_env": "", "enabled": True,
+     "billing": "free"},
 ]
 
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
@@ -129,6 +140,14 @@ def validate_models(models) -> list:
             key_env = ""
         if key_env and not _ENV_RE.match(key_env):
             raise ValueError(f"模型 {name}：key_env 只允许大写字母/数字/_")
+        # 0.1.3 计费属性：未填按类型默认值；显式填错直接拒绝
+        billing = (m.get("billing") or "").strip()
+        if not billing:
+            billing = TYPE_BILLING_DEFAULT[mtype]
+        if billing not in BILLING_VALUES:
+            raise ValueError(f"模型 {name}：billing 须为 free（免费额度）或 payg（按量计费）")
+        if mtype == "ollama":
+            billing = "free"  # 本地模型不花钱，强制 free
         timeout = m.get("timeout")
         if timeout is not None:
             try:
@@ -139,13 +158,28 @@ def validate_models(models) -> list:
                 raise ValueError(f"模型 {name}：timeout 须大于 0")
         item = {"id": mid, "name": name, "type": mtype, "model": model,
                 "base_url": base_url, "key_env": key_env,
-                "enabled": bool(m.get("enabled", True))}
+                "enabled": bool(m.get("enabled", True)), "billing": billing}
         if timeout is not None:
             item["timeout"] = timeout
         if mtype == "ollama" and (m.get("embed_model") or "").strip():
             item["embed_model"] = (m.get("embed_model") or "").strip()
         out.append(item)
     return out
+
+
+def chain_tier(m: dict) -> int:
+    """0.1.3 生效链档位：0=本地 Ollama，1=免费额度云模型，2=按量云模型。"""
+    if (m.get("type") or "") == "ollama":
+        return 0
+    billing = (m.get("billing") or
+               TYPE_BILLING_DEFAULT.get(m.get("type") or "", "payg"))
+    return 1 if billing == "free" else 2
+
+
+def chain_order(models) -> list:
+    """0.1.3 生效调用顺序：本地 Ollama → 免费额度云模型 → 按量云模型；
+    档内保持用户列表顺序（sorted 稳定排序）。不改输入列表。"""
+    return sorted(models or [], key=chain_tier)
 
 
 def load_models() -> tuple:

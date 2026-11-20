@@ -899,7 +899,8 @@ def _add_plan_args(p):
     """plan / inbox / process 共用的判定参数（与原 workfiles-curator 兼容）。"""
     p.add_argument("--rules", default="")
     p.add_argument("--media-config", default="")
-    p.add_argument("--ocr-url", default="http://127.0.0.1:8866")
+    p.add_argument("--ocr-url", default=None,
+                   help="OCR 服务地址；不填则自动探测（容器内用宿主网关地址）")
     p.add_argument("--no-ocr", action="store_true")
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--max-chars", type=int, default=2000)

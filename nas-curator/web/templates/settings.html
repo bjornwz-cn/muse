@@ -17,6 +17,7 @@
 
 <h2>模型端点（只读）</h2>
 <pre class="json" id="endpoints-pre">加载中…</pre>
+<p class="muted" id="ocr-line"></p>
 
 <h2>自动执行与定时</h2>
 <form id="settings-form">
@@ -38,14 +39,15 @@
 </form>
 
 <h2>模型列表</h2>
-<p class="muted">按顺序依次尝试，某一个失败/超时就试下一个；默认：火山 Ark Plan（Key 为空时跳过）→ 火山 Ark 按量 → 本地 Ollama。Key 只存 config/.env.local（600），页面只显掩码、不回显明文；Key 框留空表示保留已存 Key。</p>
+<p class="muted">实际生效顺序：本地 Ollama → 免费额度云模型 → 按量云模型（档内按列表顺序）；某一个失败/超时就试下一个。Key 只存 config/.env.local（600），页面只显掩码、不回显明文；Key 框留空表示保留已存 Key。</p>
 <div id="models-error"></div>
 <div class="table-wrap">
   <table>
-    <thead><tr><th>启用</th><th>名称</th><th>类型</th><th>模型 ID</th><th>Endpoint</th><th>Key</th><th>排序 / 操作</th></tr></thead>
-    <tbody id="models-body"><tr><td colspan="7" class="muted">加载中…</td></tr></tbody>
+    <thead><tr><th>启用</th><th>名称</th><th>类型</th><th>模型 ID</th><th>Endpoint</th><th>Key</th><th>计费</th><th>排序 / 操作</th></tr></thead>
+    <tbody id="models-body"><tr><td colspan="8" class="muted">加载中…</td></tr></tbody>
   </table>
 </div>
+<p class="muted" id="models-order"></p>
 <div class="btn-row">
   <button class="btn" type="button" id="btn-add-model">新增模型</button>
   <button class="btn" type="button" id="btn-save-models">保存模型列表</button>
@@ -75,13 +77,19 @@
     var keyInput = (m.type === 'ollama')
       ? '<span class="muted">—</span>'
       : '<input type="password" class="m-key inline-input" autocomplete="new-password" placeholder="' + C.esc(keyPh) + '">';
+    // 计费默认值与后端 TYPE_BILLING_DEFAULT 一致；本地 Ollama 强制免费额度且不可改
+    var billing = m.billing || ({ 'ark-plan': 'free', 'ark-payg': 'payg', 'ollama': 'free', 'custom': 'payg' }[m.type] || 'payg');
+    var billingSel = '<select class="m-billing inline-input"' + (m.type === 'ollama' ? ' disabled' : '') + '>' +
+      '<option value="free"' + (billing === 'free' ? ' selected' : '') + '>免费额度</option>' +
+      '<option value="payg"' + (billing === 'payg' ? ' selected' : '') + '>按量计费</option></select>';
     return '<tr class="model-row" data-id="' + C.esc(m.id || '') + '">' +
       '<td><input type="checkbox" class="m-enabled"' + (m.enabled === false ? '' : ' checked') + '></td>' +
       '<td><input type="text" class="m-name inline-input" value="' + C.esc(m.name || '') + '" placeholder="名称"></td>' +
       '<td><select class="m-type inline-input">' + typeOptions(m.type || 'custom') + '</select></td>' +
       '<td><input type="text" class="m-model inline-input" value="' + C.esc(m.model || '') + '" placeholder="模型 ID"></td>' +
-      '<td><input type="text" class="m-url inline-input" value="' + C.esc(m.base_url || '') + '" placeholder="endpoint"></td>' +
+      '<td><input type="text" class="m-url inline-input" value="' + C.esc(m.base_url || '') + '" placeholder="base_url"></td>' +
       '<td>' + keyInput + '</td>' +
+      '<td>' + billingSel + '</td>' +
       '<td style="white-space:nowrap">' +
         '<button class="btn ghost small m-up" type="button" title="上移">↑</button> ' +
         '<button class="btn ghost small m-down" type="button" title="下移">↓</button> ' +
@@ -93,7 +101,21 @@
     var body = document.getElementById('models-body');
     body.innerHTML = (models && models.length)
       ? models.map(modelRow).join('')
-      : '<tr><td colspan="7" class="muted">暂无模型（LLM 不可用，分类只走规则）</td></tr>';
+      : '<tr><td colspan="8" class="muted">暂无模型（LLM 不可用，分类只走规则）</td></tr>';
+  }
+
+  function orderText(order) {
+    if (!order || !order.length) return '实际生效顺序：无可用模型（分类只走规则）';
+    var labels = { free: '免费额度', payg: '按量计费' };
+    return '实际生效顺序：' + order.map(function (o) {
+      return o.name + (o.kind === 'ollama' ? '（本地）' : '（' + (labels[o.billing] || o.billing || '') + '）');
+    }).join(' → ');
+  }
+
+  function ocrText(st) {
+    if (!st || !st.url) return 'OCR 服务：未配置';
+    if (st.reachable) return 'OCR 服务：' + st.url + ' · 可达（HTTP ' + st.status + '，' + st.ms + 'ms）';
+    return 'OCR 服务：' + st.url + ' · 不可达' + (st.error ? '（' + st.error + '）' : '');
   }
 
   function collectModels() {
@@ -101,6 +123,7 @@
     var out = [];
     rows.forEach(function (tr) {
       var keyEl = tr.querySelector('.m-key');
+      var billEl = tr.querySelector('.m-billing');
       var m = {
         id: tr.getAttribute('data-id') || undefined,
         name: tr.querySelector('.m-name').value.trim(),
@@ -109,6 +132,8 @@
         base_url: tr.querySelector('.m-url').value.trim(),
         enabled: tr.querySelector('.m-enabled').checked
       };
+      // 本地 Ollama 强制免费额度
+      m.billing = (m.type === 'ollama') ? 'free' : (billEl ? billEl.value : 'payg');
       if (keyEl && keyEl.value) m.key = keyEl.value;
       out.push(m);
     });
@@ -127,6 +152,7 @@
       document.getElementById('inbox-line').textContent =
         '统一收件箱：' + (inbox.path || '—') + (inbox.scan_interval_minutes != null ? ' · 每 ' + inbox.scan_interval_minutes + ' 分钟扫描' : '');
       document.getElementById('endpoints-pre').textContent = JSON.stringify(d.model_endpoints || {}, null, 2);
+      document.getElementById('ocr-line').textContent = ocrText(d.ocr_status);
       if (d.auto_apply != null) document.getElementById('s-auto-apply').checked = !!d.auto_apply;
       var sch = d.schedule || {};
       if (sch.inbox_scan_minutes != null) document.getElementById('s-scan').value = sch.inbox_scan_minutes;
@@ -134,6 +160,7 @@
       if (sch.settle_minutes != null) document.getElementById('s-settle').value = sch.settle_minutes;
       else if (inbox.settle_minutes != null) document.getElementById('s-settle').value = inbox.settle_minutes;
       renderModels(d.models || []);
+      document.getElementById('models-order').textContent = orderText(d.effective_order);
       document.getElementById('models-note').textContent =
         (d.models_source === 'file' ? '已保存过自定义列表' : '当前为默认列表（未保存过）');
     } catch (e) {
@@ -174,20 +201,28 @@
     }
   });
   document.getElementById('models-body').addEventListener('change', function (ev) {
-    // 类型切到本地 Ollama 时 Key 框隐藏（不需要 Key）；切回来恢复
+    // 类型切到本地 Ollama 时 Key 框隐藏（不需要 Key），计费固定免费额度；
+    // 切回来恢复
     var sel = ev.target.closest('.m-type');
     if (!sel) return;
     var tr = sel.closest('.model-row');
     var keyCell = tr.querySelectorAll('td')[5];
-    if (sel.value === 'ollama') keyCell.innerHTML = '<span class="muted">—</span>';
-    else if (!keyCell.querySelector('.m-key')) {
-      keyCell.innerHTML = '<input type="password" class="m-key inline-input" autocomplete="new-password" placeholder="未设置">';
+    var billSel = tr.querySelector('.m-billing');
+    if (sel.value === 'ollama') {
+      keyCell.innerHTML = '<span class="muted">—</span>';
+      if (billSel) { billSel.value = 'free'; billSel.disabled = true; }
+    } else {
+      if (!keyCell.querySelector('.m-key')) {
+        keyCell.innerHTML = '<input type="password" class="m-key inline-input" autocomplete="new-password" placeholder="未设置">';
+      }
+      if (billSel) billSel.disabled = false;
     }
   });
   document.getElementById('btn-save-models').addEventListener('click', async function () {
     try {
       var res = await C.api('/api/settings/models', { method: 'PUT', body: { models: collectModels() } });
       renderModels(res.models || []);
+      if (res.effective_order) document.getElementById('models-order').textContent = orderText(res.effective_order);
       document.getElementById('models-note').textContent = res.note || '已保存';
       C.toast('模型列表已保存（Key 只显掩码）');
     } catch (e) {

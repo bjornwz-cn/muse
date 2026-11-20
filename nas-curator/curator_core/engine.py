@@ -647,7 +647,7 @@ def _to_plan_item(row, root, min_score, rename, texts, mtimes, dst_root=None):
 
 def plan_files(root, rules, *, llm=None, sem=None, prescreener=None, rename=False,
                rename_llm=False, unit_mode="auto", protect=(), workers=8, cache=None,
-               min_score=4, content_first=False, ocr_url="http://127.0.0.1:8866",
+               min_score=4, content_first=False, ocr_url=None,
                no_ocr=False, max_chars=2000, ocr_timeout=90, llm_min_conf=0.55,
                llm_max=2000, llm_all=False, llm_chunk=8, llm_timeout=240,
                strong=12, name_template="{date}_{title}", deep=False,
@@ -1249,7 +1249,7 @@ def analyze(root, unit_mode="auto"):
                        "files": u["files"], "bytes": u["bytes"]} for u in units]}
 
 
-def explain(path, rules=None, *, llm=None, ocr_url="http://127.0.0.1:8866",
+def explain(path, rules=None, *, llm=None, ocr_url=None,
             no_ocr=False, max_chars=3000):
     """解释单个文件/目录的判定依据（与原 cmd_explain 同口径，返回 dict 不打印）。
 
@@ -1331,7 +1331,7 @@ def pick_samples(paths, limit=5, allow_media=False, pool=12):
 
 
 def learn_rules(root, *, per_cat=6, topk=10, llm=None, default="", skip=(),
-                ocr_url="http://127.0.0.1:8866", no_ocr=False, llm_timeout=120):
+                ocr_url=None, no_ocr=False, llm_timeout=120):
     """从一个「已经整理好」的目录反推类目体系，返回 rules dict（不写文件）。
 
     与原 cmd_learn 同口径：每类目抽样读正文 -> 关键词（LLM 有则用 LLM，

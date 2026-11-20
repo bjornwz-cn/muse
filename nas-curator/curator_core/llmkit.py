@@ -6,13 +6,19 @@
   1) 规则判不准时，读文件名+正文，给出类目与标题；
   2) 用 bge-m3 向量对目录内文件做主题聚类，辅助「整目录归属」判断。
 
-与 v2 的差别：把「怎么调模型」抽成 provider 链，按顺序自动降级
-  ark-plan（火山 Agent Plan，首选）-> ark-payg（按量付费）-> local（本地 ollama）
+与 v2 的差别：把「怎么调模型」抽成 provider 链，按顺序自动降级。
 任何一环不可用/超时/额度尽/被封，自动切下一个，主流程不阻塞。
 
 0.1.2：provider 链改为用户可配的模型列表（common.llm_models，
 config/llm_models.json，设置页写；顺序即优先级）。类型新增 custom
 （自定义 OpenAI 兼容 endpoint，走 chat/completions，不带 thinking 字段）。
+
+0.1.3：生效链改为三档（王震亲定）：本地 Ollama → 免费额度云模型 →
+按量计费云模型；档内保持用户列表顺序。计费属性见模型条目的 billing
+（free/payg；ark-plan 默认 free，ark-payg 默认 payg，ollama 强制 free，
+custom 默认 payg、可标 free）。Key 为空的云模型在加载时即跳过
+（Ark Plan 订阅 2026-11-25 到期后，其免费额度即失效——无 Key/额度耗尽
+时该 provider 不进链，调用自动落到下一档，无需手动处理）。
 
 约束：
   - 全链失败 -> 返回 None，调用方沿用规则结论；
@@ -112,6 +118,7 @@ def _providers_from_legacy(cfg):
                         "base_url": p.get("base_url") or DEFAULT_HOST,
                         "model": p.get("model") or DEFAULT_MODEL,
                         "embed_model": p.get("embed_model") or DEFAULT_EMBED,
+                        "billing": "free",
                         "timeout": p.get("timeout") or 25})
             continue
         env_name = p.get("api_key_env") or _ARK_ENV.get(name, "")
@@ -124,26 +131,36 @@ def _providers_from_legacy(cfg):
                                  (ARK_BASE_PLAN if "plan" in name else ARK_BASE_PAYG)).rstrip("/"),
                     "api_key": key,
                     "model": p.get("model") or "deepseek-v4-1-flash-261017",
+                    # 0.1.3：legacy 链的计费档位与模型列表默认值一致
+                    "billing": "free" if "plan" in name else "payg",
                     "timeout": p.get("timeout") or 30})
     if not any(p["kind"] == "ollama" for p in out):
         out.append({"name": "local", "kind": "ollama", "base_url": DEFAULT_HOST,
-                    "model": DEFAULT_MODEL, "embed_model": DEFAULT_EMBED, "timeout": 25})
+                    "model": DEFAULT_MODEL, "embed_model": DEFAULT_EMBED,
+                    "billing": "free", "timeout": 25})
     return out
 
 
 def _providers_from_models(models):
-    """0.1.2 模型列表文件来源：按文件顺序原样执行（不强制补本地兜底）。
+    """0.1.2 模型列表文件来源：按文件顺序读入（不强制补本地兜底）；
+    0.1.3 生效顺序由 _load_config 的 order_providers 再按三档重排
+    （本地 Ollama → 免费额度云模型 → 按量云模型；档内保持文件顺序）。
 
     type 映射：ark-plan/ark-payg -> kind "ark"；ollama -> "ollama"；
     custom -> kind "openai"（OpenAI 兼容 chat/completions，不带 thinking 字段）。
-    未启用、或需 Key 但 Key 为空的条目跳过。
+    未启用、或需 Key 但 Key 为空的条目跳过。计费档位取条目 billing
+    （0.1.3；缺失时按类型默认值补）。
     """
+    from common.llm_models import TYPE_BILLING_DEFAULT
     out = []
     for m in models or []:
         if not m.get("enabled", True):
             continue
         t = m.get("type")
         mid = m.get("id") or t
+        billing = (m.get("billing") or TYPE_BILLING_DEFAULT.get(t, "payg"))
+        if t == "ollama":
+            billing = "free"
         if t in ("ark-plan", "ark-payg"):
             key = _resolve_key(m.get("key_env") or _ARK_ENV.get(t, ""))
             if not key:
@@ -154,12 +171,14 @@ def _providers_from_models(models):
                                       else ARK_BASE_PAYG)).rstrip("/"),
                         "api_key": key,
                         "model": m.get("model") or "deepseek-v4-1-flash-261017",
+                        "billing": billing,
                         "timeout": m.get("timeout") or 30})
         elif t == "ollama":
             out.append({"name": mid, "kind": "ollama",
                         "base_url": (m.get("base_url") or DEFAULT_HOST).rstrip("/"),
                         "model": m.get("model") or DEFAULT_MODEL,
                         "embed_model": m.get("embed_model") or DEFAULT_EMBED,
+                        "billing": "free",
                         "timeout": m.get("timeout") or 25})
         elif t == "custom":
             key = _resolve_key(m.get("key_env") or "")
@@ -169,12 +188,38 @@ def _providers_from_models(models):
                         "base_url": m["base_url"].rstrip("/"),
                         "api_key": key,
                         "model": m.get("model") or "",
+                        "billing": billing,
                         "timeout": m.get("timeout") or 30})
     return out
 
 
+def _chain_tier(p: dict) -> int:
+    """0.1.3 生效链档位：0=本地 Ollama，1=免费额度云模型，2=按量云模型。"""
+    if p.get("kind") == "ollama":
+        return 0
+    return 1 if p.get("billing") == "free" else 2
+
+
+def order_providers(providers) -> list:
+    """0.1.3：把 provider 链按三档重排（档内保持原顺序，sorted 稳定排序）。
+    不改输入列表。"""
+    return sorted(providers or [], key=_chain_tier)
+
+
+def effective_chain() -> list:
+    """供设置页显示：当前实际生效的调用顺序（已跳过无 Key 的云模型）。
+    返回 [{"name","kind","billing"}]，不含 Key。"""
+    try:
+        return [{"name": p["name"], "kind": p["kind"],
+                 "billing": p.get("billing", "free" if p["kind"] == "ollama" else "payg")}
+                for p in _load_config()]
+    except Exception:
+        return []
+
+
 def _load_config():
-    """返回 provider 列表，按优先级排列。
+    """返回 provider 列表，按 0.1.3 生效顺序排列（本地 Ollama → 免费额度云模型
+    → 按量云模型；档内保持列表顺序）。
 
     来源（按优先）：1) CURATOR_LLM_CONFIG 指定的 legacy 配置文件；
     2) 模型列表文件（0.1.2 设置页写，见 common.llm_models）；
@@ -187,15 +232,15 @@ def _load_config():
             cfg = json.load(open(CONFIG_PATH, encoding="utf-8"))
         except Exception:
             cfg = {}
-        return _providers_from_legacy(cfg)
+        return order_providers(_providers_from_legacy(cfg))
     try:
         from common.llm_models import load_models
         models, source = load_models()
     except Exception:  # noqa: BLE001
         models, source = [], "default"
     if source == "file":
-        return _providers_from_models(models)
-    return _providers_from_legacy({})
+        return order_providers(_providers_from_models(models))
+    return order_providers(_providers_from_legacy({}))
 
 
 class LLM:

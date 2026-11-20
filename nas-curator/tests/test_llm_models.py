@@ -98,10 +98,10 @@ def test_llm_loads_models_file_and_skips_keyless(monkeypatch, tmp_path):
     llm = LLM()
     # ark-plan 无 Key -> 跳过，只剩 local
     assert [p["name"] for p in llm.providers] == ["local"], llm.providers
-    # 写 Key 到环境变量 -> ark-plan 出现且排第一
+    # 写 Key 到环境变量 -> ark-plan 出现；0.1.3 本地优先，排在 ark-plan 之前
     monkeypatch.setenv("ARK_PLAN_KEY", "dummy-plan-key")
     llm2 = LLM()
-    assert [p["name"] for p in llm2.providers] == ["ark-plan", "local"]
+    assert [p["name"] for p in llm2.providers] == ["local", "ark-plan"]
     print("llm loads models file: PASS")
 
 

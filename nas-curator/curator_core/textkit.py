@@ -46,6 +46,41 @@ BAD_NAME = re.compile(
     r"扫描件|扫描|图片|照片|副本|copy|untitled|document|file|download|下载)\s*[-_ ()]*\d*$", re.I)
 
 
+LOCAL_OCR_URL = "http://127.0.0.1:8866"
+GATEWAY_OCR_URL = "http://172.17.0.1:8866"
+_OCR_URL_CACHE = {"url": None}
+
+
+def resolve_ocr_url(timeout=2.0) -> str:
+    """OCR 默认地址（0.1.3）：环境变量 OCR_URL 优先；否则探测。
+
+    容器内 127.0.0.1 指向容器自身，ocr-service 在宿主 docker 网桥上，
+    所以 127.0.0.1:8866 在容器里永远不通（Connection refused）；
+    探测不到就用宿主网关地址 172.17.0.1:8866。GET /ocr 返回 405
+    （只接受 POST）也算可达。结果按进程缓存；两边都不通时默认网关地址
+    （容器内正确地址；本机开发无 OCR 服务时调用仍会失败并返回空文本，
+    不抛错）。"""
+    import urllib.error
+    import urllib.request
+    env = os.environ.get("OCR_URL", "").strip()
+    if env:
+        return env.rstrip("/")
+    if _OCR_URL_CACHE["url"]:
+        return _OCR_URL_CACHE["url"]
+    for cand in (LOCAL_OCR_URL, GATEWAY_OCR_URL):
+        try:
+            req = urllib.request.Request(cand + "/ocr", method="GET")
+            with urllib.request.urlopen(req, timeout=timeout):
+                pass
+        except urllib.error.HTTPError:
+            _OCR_URL_CACHE["url"] = cand  # 任意 HTTP 状态（含 405）即为可达
+            return cand
+        except Exception:
+            continue
+    _OCR_URL_CACHE["url"] = GATEWAY_OCR_URL
+    return GATEWAY_OCR_URL
+
+
 def run_cmd(cmd, timeout=60, stdin_data=None):
     try:
         r = subprocess.run(cmd, capture_output=True, timeout=timeout, input=stdin_data)
@@ -207,11 +242,20 @@ def msg_text(path, max_chars=3000):
         return ""
 
 
-def ocr_file(path, ocr_url="http://127.0.0.1:8866", timeout=90, max_chars=1500):
+def ocr_file(path, ocr_url=None, timeout=90, max_chars=1500):
+    """调 ocr-service /ocr 识别图片或扫描版 PDF。
+
+    ocr_url 为空时自动探测（resolve_ocr_url；容器内用网关地址）。
+
+    已知限制：Docling 中文 OCR 的数字会系统性误读为 0（2026-11-15 归档实测）。
+    OCR 文本只用于判类/检索，绝不可信赖其中的数字（如金额、日期、编号）；
+    不要试图“修”这个误读——这是上游模型行为，不是本层 bug。
+    """
+    ocr_url = (ocr_url or resolve_ocr_url()).rstrip("/")
     try:
         import requests
         with open(path, "rb") as f:
-            r = requests.post(ocr_url.rstrip("/") + "/ocr",
+            r = requests.post(ocr_url + "/ocr",
                               files={"file": (os.path.basename(path), f)},
                               timeout=timeout)
         if r.status_code == 200:
@@ -237,9 +281,13 @@ def pdf_text(path, max_chars=3000):
     return ""
 
 
-def extract_text(path, ext=None, max_chars=3000, ocr_url="http://127.0.0.1:8866",
+def extract_text(path, ext=None, max_chars=3000, ocr_url=None,
                  ocr_timeout=90, allow_ocr=True):
-    """返回 (文本, 来源标记)。来源用于诊断：pdf/docx/ocr/cached/empty/cloudsync。"""
+    """返回 (文本, 来源标记)。来源用于诊断：pdf/docx/ocr/cached/empty/cloudsync。
+
+    ocr_url 为空时自动探测（resolve_ocr_url；容器内用网关地址）。
+    PDF 先读文字层，无文字层时才调 OCR（来源 pdf-ocr）；图片直接 OCR（img-ocr）。
+    """
     ext = (ext or os.path.splitext(path)[1]).lower()
     try:
         with open(path, "rb") as f:

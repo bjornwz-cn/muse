@@ -73,7 +73,7 @@ def _plan_namespace(body: CreateJobBody, root: str, db_path: str) -> argparse.Na
     return argparse.Namespace(
         db=db_path, root=root, library=body.library or "", kind="document",
         out="", rules="", media_config="",
-        ocr_url=me.get("ocr_url") or "http://127.0.0.1:8866", no_ocr=False, workers=8,
+        ocr_url=me.get("ocr_url") or None, no_ocr=False, workers=8,
         max_chars=2000, ocr_timeout=90, min_score=4, content_first=False,
         cache="", unit_mode="auto", protect="",
         rename=bool(body.rename), rename_llm=False,

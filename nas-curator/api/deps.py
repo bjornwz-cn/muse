@@ -53,7 +53,10 @@ DEFAULT_DB = os.path.join(PROJECT_ROOT, "data", "nas-curator.db")
 # 模型端点默认值（与 curator.py build_parser 的默认值一致；只读配置，不主动连接）
 DEFAULT_LLM_HOST = "http://172.17.0.1:11434"
 DEFAULT_SEM_HOST = "http://172.17.0.1:11500"
-DEFAULT_OCR_URL = "http://127.0.0.1:8866"
+# 0.1.3：默认 OCR 地址改为容器内可达的宿主网关地址。127.0.0.1 在容器内
+# 指向容器自身，ocr-service 在宿主 docker 网桥上，那里永远不通；
+# 显式配置（libraries.json / OCR_URL 环境变量）仍优先于此默认值。
+DEFAULT_OCR_URL = "http://172.17.0.1:8866"
 
 # 凭据 provider → 环境变量名（只做映射，值绝不进代码/日志）
 KEY_ENV_VARS = {
@@ -139,11 +142,39 @@ def get_settings() -> dict:
 
 
 def public_settings() -> dict:
-    """GET /api/settings 的返回体：get_settings() 去内部键 + 掩码后的凭据。"""
+    """GET /api/settings 的返回体：get_settings() 去内部键 + 掩码后的凭据。
+
+    0.1.3：附带 ocr_status（OCR 端点实时可达状态，供设置页/向导页显示；
+    探活超时 1.5 秒，不可达时不阻塞返回）。
+    """
     s = get_settings()
     s.pop("_raw", None)
     s["keys"] = masked_keys()
+    s["ocr_status"] = probe_ocr((s.get("model_endpoints") or {}).get("ocr_url") or "")
     return s
+
+
+def probe_ocr(url: str, timeout: float = 1.5) -> dict:
+    """探活 OCR 端点：GET /ocr，任意 HTTP 状态即为可达
+    （该端点只接受 POST，GET 返回 405 也算可达）；连接失败则不可达。"""
+    import time
+    import urllib.error
+    import urllib.request
+    url = (url or "").rstrip("/")
+    t0 = time.time()
+    if not url:
+        return {"url": "", "reachable": False, "status": None, "ms": 0}
+    try:
+        req = urllib.request.Request(url + "/ocr", method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return {"url": url, "reachable": True, "status": r.status,
+                    "ms": int((time.time() - t0) * 1000)}
+    except urllib.error.HTTPError as e:
+        return {"url": url, "reachable": True, "status": e.code,
+                "ms": int((time.time() - t0) * 1000)}
+    except Exception as e:
+        return {"url": url, "reachable": False, "status": None,
+                "ms": int((time.time() - t0) * 1000), "error": type(e).__name__}
 
 
 def read_env_local() -> dict:

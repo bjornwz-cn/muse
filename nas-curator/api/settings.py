@@ -76,6 +76,13 @@ def get():
     models, source = public_models()
     out["models"] = models
     out["models_source"] = source
+    # 0.1.3：实际生效的调用顺序（本地 Ollama → 免费额度云模型 → 按量云模型；
+    # 已跳过无 Key 的云模型），供设置页显示。
+    try:
+        from curator_core.llmkit import effective_chain
+        out["effective_order"] = effective_chain()
+    except Exception:
+        out["effective_order"] = []
     return out
 
 
@@ -149,13 +156,20 @@ def put_models(body: ModelsPutBody):
     except (OSError, ValueError) as e:
         raise HTTPException(status_code=500, detail=f"写模型列表失败：{e}")
     models, source = public_models()
-    note = ("模型列表已保存（顺序即 fallback 优先级）；Key 已写 .env.local（600），"
-            "页面只显掩码。收件箱监听下轮扫描即用新列表，无需重启容器。")
+    try:
+        from curator_core.llmkit import effective_chain
+        eff = effective_chain()
+    except Exception:
+        eff = []
+    note = ("模型列表已保存；实际生效顺序：本地 Ollama → 免费额度云模型 → "
+            "按量云模型（档内按列表顺序；Key 已写 .env.local（600），页面只显掩码）。"
+            "收件箱监听下轮扫描即用新列表，无需重启容器。")
     if not any(m.get("type") == "ollama" and m.get("enabled") for m in norm):
         note += "注意：列表里没有启用的本地 Ollama，全链失败时将直接降级为规则判定。"
     if not norm:
         note += "注意：列表为空，LLM 不可用，分类只走规则。"
-    return {"ok": True, "models": models, "models_source": source, "note": note}
+    return {"ok": True, "models": models, "models_source": source,
+            "effective_order": eff, "note": note}
 
 
 @router.post("/key")
