@@ -1,0 +1,8 @@
+[Unit]
+Description=NAS Curator 升级执行（半自动升级：由 timer 每分钟触发，拾取一键升级请求）
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/root/local_scripts/nas-curator-upgrade-watcher.sh

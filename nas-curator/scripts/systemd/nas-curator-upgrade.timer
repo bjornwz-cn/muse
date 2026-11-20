@@ -1,0 +1,10 @@
+[Unit]
+Description=每分钟检查 NAS Curator 一键升级请求
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+Persistent=false
+
+[Install]
+WantedBy=timers.target

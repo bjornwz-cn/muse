@@ -16,6 +16,14 @@ LIBRARIES_JSON = os.path.join(CONFIG_DIR, "libraries.json")
 ENV_LOCAL = os.path.join(CONFIG_DIR, ".env.local")
 
 
+def get_upgrade_dir() -> str:
+    """升级工作目录：与 DB 文件同目录下的 upgrade/（检查缓存、请求标志、状态文件）。
+
+    容器内为 /data/upgrade；本地开发为项目 data/upgrade。
+    """
+    return os.path.join(os.path.dirname(get_db_path()), "upgrade")
+
+
 def get_setup_marker() -> str:
     """首次安装向导完成标记：与 DB 文件同目录的 .setup_done。"""
     return os.path.join(os.path.dirname(get_db_path()), ".setup_done")

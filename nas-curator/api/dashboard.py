@@ -8,6 +8,8 @@ from fastapi import APIRouter, Depends
 
 from .deps import get_db, get_settings
 
+from common.version import read_local_version
+
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
 
@@ -71,6 +73,7 @@ def dashboard(conn=Depends(get_db)):
         " LEFT JOIN files f ON f.id=q.file_id"
         " WHERE q.kind='dup' AND q.status='pending'").fetchone()["b"]
     return {
+        "version": read_local_version()["version"],  # 0.1.4：总览页显示当前版本
         "libraries": libraries,
         "review_pending": review_pending,
         "today_new": today_new,

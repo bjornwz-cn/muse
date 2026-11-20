@@ -18,7 +18,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from common import db as DB
-from . import browse, dashboard, jobs, review, rules, settings, wizard
+from . import browse, dashboard, jobs, review, rules, settings, upgrade, wizard
 from .deps import ensure_config, get_db_path, is_setup_done
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -49,7 +49,7 @@ def create_app() -> FastAPI:
     app = FastAPI(title="NAS Curator", version="0.2.0", lifespan=lifespan)
     app.add_middleware(SetupRedirectMiddleware)
 
-    for mod in (dashboard, review, jobs, browse, rules, settings, wizard):
+    for mod in (dashboard, review, jobs, browse, rules, settings, upgrade, wizard):
         app.include_router(mod.router)
 
     if os.path.isdir(STATIC_DIR):

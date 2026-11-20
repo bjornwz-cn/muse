@@ -2,9 +2,10 @@
 {% block title %}总览{% endblock %}
 {% block content %}
 <h1>总览</h1>
-<p class="lead">三库状态、今日新增、复核待处理与最近任务。</p>
+<p class="lead">三库状态、今日新增、复核待处理与最近任务。<span class="meta" id="app-version"></span></p>
 
 <div id="dash-error"></div>
+<div id="upgrade-banner" aria-live="polite"></div>
 
 <section aria-label="三库">
   <div class="cards" id="library-cards"><p class="loading">加载中…</p></div>
@@ -42,9 +43,94 @@
 <script>
 (function () {
   var C = window.Curator;
+  var UPGRADE_STAGES = {
+    queued: '已提交，等待升级', fetch: '拉取最新代码', build: '构建新镜像',
+    backup: '备份数据库', deploy: '替换镜像并重建容器', verify: '验证新版本',
+    rollback: '回滚到上一版', done: '完成'
+  };
+  var upgradeTarget = '';
+
+  function renderUpgradeBanner(d) {
+    var box = document.getElementById('upgrade-banner');
+    if (!box) return;
+    if (d.error && !d.latest) {
+      box.innerHTML = '<div class="banner muted">检查新版本失败（' + C.esc(d.error) +
+        '），稍后重试，不影响使用。</div>';
+      return;
+    }
+    if (d.update_available) {
+      box.innerHTML = '<div class="banner warn"><b>有新版本 ' + C.esc(d.latest) + ' 可用</b>' +
+        (d.notes ? '（' + C.esc(d.notes) + '）' : '') +
+        ' <button id="upgrade-btn" class="btn">一键升级</button>' +
+        '<span class="meta">升级前自动备份数据库，失败自动回滚到上一版；升级过程约需数分钟，期间页面会短暂不可用。</span></div>';
+      var btn = document.getElementById('upgrade-btn');
+      if (btn) btn.addEventListener('click', startUpgrade);
+    } else if (d.latest) {
+      box.innerHTML = '<div class="banner ok">已是最新版本 ' + C.esc(d.latest) +
+        (d.checked_at ? '（检查于 ' + C.fmtTime(d.checked_at * 1000) + '）' : '') + '</div>';
+    }
+  }
+
+  function renderUpgradeStatus(s) {
+    var box = document.getElementById('upgrade-banner');
+    if (!box) return;
+    var stage = UPGRADE_STAGES[s.stage] || s.stage || s.state;
+    if (s.state === 'done') {
+      box.innerHTML = '<div class="banner ok"><b>升级完成：已升到 ' + C.esc(s.target_version) + '</b>，页面即将刷新。</div>';
+      setTimeout(function () { window.location.reload(); }, 3000);
+    } else if (s.state === 'failed') {
+      box.innerHTML = '<div class="banner error"><b>升级失败：' + C.esc(s.error || '未知原因') + '</b>' +
+        (s.rolled_back ? '已自动回滚到上一版，当前版本仍可正常使用。' : '自动回滚也失败了，请联系管理员手动处理。') + '</div>';
+    } else {
+      box.innerHTML = '<div class="banner info"><b>正在升级到 ' + C.esc(s.target_version) + '…</b> ' +
+        C.esc(stage) + (s.message ? '：' + C.esc(s.message) : '') + '</div>';
+    }
+  }
+
+  function startUpgrade() {
+    if (!upgradeTarget) return;
+    if (!window.confirm('确定升级到 ' + upgradeTarget + ' 吗？\n升级前会自动备份数据库；任一步失败都会自动回滚到上一版。\n升级过程约需数分钟，期间页面会短暂不可用。')) return;
+    C.api('/api/upgrade/request', { method: 'POST', body: { target_version: upgradeTarget } })
+      .then(function () {
+        C.toast('已提交升级请求，开始升级…');
+        C.poll(async function () {
+          var s = await C.api('/api/upgrade/status');
+          renderUpgradeStatus(s);
+          return s.state === 'done' || s.state === 'failed';
+        }, { intervalMs: 3000, maxTries: 200 });
+      })
+      .catch(function (e) { C.toast('提交升级请求失败：' + e.message, true); });
+  }
+
+  async function loadUpgrade() {
+    try {
+      var d = await C.api('/api/upgrade/check');
+      if (d.update_available) upgradeTarget = d.latest || '';
+      renderUpgradeBanner(d);
+      if (d.refreshing) {
+        setTimeout(loadUpgrade, 15000);  // 后台刷新中，15 秒后再取一次
+        return;
+      }
+      // 已有进行中的升级：继续轮询进度
+      var s = await C.api('/api/upgrade/status');
+      if (s.state === 'requested' || s.state === 'running') {
+        upgradeTarget = s.target_version || '';
+        C.poll(async function () {
+          var st = await C.api('/api/upgrade/status');
+          renderUpgradeStatus(st);
+          return st.state === 'done' || st.state === 'failed';
+        }, { intervalMs: 3000, maxTries: 200 });
+      }
+    } catch (e) {
+      /* 检查失败不阻塞总览页 */
+    }
+  }
+
   async function load() {
     try {
       var d = await C.api('/api/dashboard');
+      document.getElementById('app-version').textContent = d.version ? ('当前版本 ' + d.version) : '';
+      var cards = (d.libraries || []).map(function (lib) {
       var cards = (d.libraries || []).map(function (lib) {
         return '<div class="card"><h3>' + C.esc(lib.name) + '</h3>' +
           '<div class="stat-row"><div class="stat"><b>' + C.fmtNum(lib.files) + '</b><span class="meta">文件</span></div>' +
@@ -70,6 +156,7 @@
     }
   }
   load();
+  loadUpgrade();
 })();
 </script>
 {% endblock %}
