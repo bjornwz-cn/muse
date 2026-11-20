@@ -64,6 +64,9 @@ __all__ = [
 TEXT_EXT = TK.TEXT_EXT
 OOXML_EXT = TK.OOXML_EXT
 OLE_EXT = TK.OLE_EXT
+# 0.1.5：以下三项保留为缺省快照（兼容旧导入）；判定逻辑一律调 TK 的函数
+# （TK.get_image_exts() / TK.image_exts() / TK.need_text_exts()），
+# 否则设置页改了图片扩展名后，运行中进程仍用旧值。
 IMG_EXT = TK.IMG_EXT
 ARCHIVE_EXT = TK.ARCHIVE_EXT | {".bz2", ".xz", ".iso"}
 IMAGE_EXT = TK.IMG_EXT | {".pdf"}
@@ -162,7 +165,7 @@ def inventory(root, max_dup_show=200):
     shells = [p for p, size, ext, _ in files
               if (ext in (".eml", ".msg") and size < 2048) or size == 0]
     archives = [{"path": p, "size": size} for p, size, ext, _ in files if ext in ARCHIVE_EXT]
-    images = sum(1 for _, _, ext, _ in files if ext in IMAGE_EXT)
+    images = sum(1 for _, _, ext, _ in files if ext in TK.image_exts())
     dirs = sum(len(dn) for _, dn, _ in os.walk(root))
 
     return {
@@ -624,7 +627,7 @@ def _to_plan_item(row, root, min_score, rename, texts, mtimes, dst_root=None):
             tags = []
     if is_unit:
         kind = "unit"
-    elif ext in (TK.IMG_EXT | TK.AV_EXT):
+    elif ext in (TK.get_image_exts() | TK.AV_EXT):
         kind = "media"
     else:
         kind = "document"
@@ -731,7 +734,7 @@ def plan_files(root, rules, *, llm=None, sem=None, prescreener=None, rename=Fals
             dns[:] = [d for d in dns if d not in JUNK_NAMES]
             for fn in fns:
                 ext = os.path.splitext(fn)[1].lower()
-                if ext in NEED_TEXT - IMG_EXT:
+                if ext in TK.need_text_exts() - TK.get_image_exts():
                     picks.append(os.path.join(dp, fn))
                 if len(picks) >= 12:
                     break
@@ -873,7 +876,7 @@ def plan_files(root, rules, *, llm=None, sem=None, prescreener=None, rename=Fals
                          "score": 0, "reason": "scanned-no-text", "text_len": 0,
                          "evidence": "", "confidence": ""})
             continue
-        if ext in NEED_TEXT and len(body) < 10 and ext not in IMG_EXT:
+        if ext in TK.need_text_exts() and len(body) < 10 and ext not in TK.get_image_exts():
             rows.append({**base_row, "category": low_cat,
                          "score": 0, "reason": f"unreadable:{srcs.get(p, 'empty')}",
                          "text_len": len(body), "evidence": "", "confidence": ""})
@@ -1373,7 +1376,7 @@ def learn_rules(root, *, per_cat=6, topk=10, llm=None, default="", skip=(),
                 exts[ext] += 1
                 if len(files_all) < 200:
                     files_all.append(ep)
-                if ext in NEED_TEXT:
+                if ext in TK.need_text_exts():
                     pool.setdefault(ext, []).append(ep)
         # 按扩展名轮转取样，避免整个类目只读到同一种文档
         while len(samples) < per_cat and any(pool.values()):

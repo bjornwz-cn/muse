@@ -94,7 +94,7 @@
     return '<span class="tag status-' + esc(status || '') + '">' + esc(labels[status] || status || '—') + '</span>';
   }
 
-  /* ---------- 复核待处理数徽标 ---------- */
+  /* ---------- 复核待处理数徽标 + 顶部版本号 ---------- */
   async function refreshReviewBadge() {
     var badge = document.getElementById('review-badge');
     if (!badge) return;
@@ -103,8 +103,28 @@
       var n = Number(d.review_pending) || 0;
       badge.textContent = n;
       badge.hidden = n <= 0;
+      /* 0.1.5：顶部导航常驻版本号（与总览页同一来源 /api/dashboard 的 version） */
+      var ver = document.getElementById('nav-version');
+      if (ver && d.version) ver.textContent = '当前版本 ' + d.version;
     } catch (e) {
       badge.hidden = true; /* 后端未就绪时不显示错误徽标 */
+    }
+  }
+
+  /* ---------- 顶部新版本提示 ---------- */
+  async function refreshNavUpdate() {
+    var link = document.getElementById('nav-update');
+    if (!link) return;
+    try {
+      var d = await api('/api/upgrade/check');
+      if (d.update_available && d.latest) {
+        link.textContent = '有新版 ' + d.latest;
+        link.hidden = false;
+      } else {
+        link.hidden = true; /* 无新版本不打扰 */
+      }
+    } catch (e) {
+      link.hidden = true; /* 检查失败时不打扰 */
     }
   }
 
@@ -150,6 +170,7 @@
       if (href === path) a.classList.add('active');
     });
     refreshReviewBadge();
+    refreshNavUpdate();
   });
 
   /* 导出给各页内联脚本用 */

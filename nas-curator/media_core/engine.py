@@ -54,7 +54,9 @@ from .curate import (  # noqa: E402
     dhash_int,
     ensure_cv2_first,
     ensure_readable,
+    get_image_exts,
     hamming,
+    media_exts,
     scan_inbox,
     sha256_of,
     stable_filter,
@@ -255,7 +257,8 @@ def plan_media_files(paths, cfg, *, classifier=None, index=None, library_root=No
             continue
 
         # 入口断言：非媒体扩展名一律 skip（图书/音乐绝不碰）。
-        if ext not in MEDIA_EXTS:
+        # 0.1.5：用函数 media_exts()，随图片扩展名配置动态变化。
+        if ext not in media_exts():
             item = _base_item(path, name, "", size, ext, sha256="")
             item.update({"action": "skip", "reason": "not-media",
                          "evidence": "", "tags": [], "review_kind": None})
@@ -263,7 +266,7 @@ def plan_media_files(paths, cfg, *, classifier=None, index=None, library_root=No
             stats["skipped"] += 1
             continue
         stats["media"] += 1
-        kind_cn = "照片" if ext in IMG_EXT else "视频"
+        kind_cn = "照片" if ext in get_image_exts() else "视频"
         row = {"path": path, "name": name, "kind": kind_cn,
                "size": size, "mtime": 0, "ext": ext}
         try:

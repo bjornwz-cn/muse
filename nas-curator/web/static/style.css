@@ -38,6 +38,9 @@ a:hover { text-decoration: underline; }
   color: var(--text); padding: 6px 10px; border-radius: 6px; white-space: nowrap;
 }
 .nav a:hover { background: var(--accent-soft); text-decoration: none; }
+/* 0.1.5：顶部导航常驻版本号 + 有新版时的小提示（点进总览页升级） */
+.nav-version { margin-left: auto; font-size: 13px; color: var(--muted); white-space: nowrap; }
+.nav-update { font-size: 13px; color: var(--accent); background: var(--accent-soft); border-radius: 999px; padding: 2px 10px; white-space: nowrap; }
 .nav a.active { background: var(--accent); color: #fff; }
 .badge {
   display: inline-block; min-width: 20px; padding: 0 6px; border-radius: 10px;
@@ -127,6 +130,9 @@ select.inline-input { width: auto; }
 .review-item { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; margin-bottom: 12px; }
 .review-item .head { display: flex; gap: 8px; flex-wrap: wrap; align-items: baseline; }
 .review-item .head .path { flex: 1; min-width: 200px; }
+/* 0.1.5：卡片顶部“需要你决定”白话说明 + 可点击的文件链接 */
+.review-note { background: #fef3c7; color: #92400e; border-radius: 6px; padding: 8px 10px; margin: 0 0 10px; font-size: 14px; }
+.file-link { color: var(--accent); word-break: break-all; }
 .review-item .dst { font-size: 13px; color: var(--muted); word-break: break-all; }
 .review-edit { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; margin-top: 10px; }
 .review-edit label { font-size: 12px; color: var(--muted); }

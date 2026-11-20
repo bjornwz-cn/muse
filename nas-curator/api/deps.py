@@ -123,10 +123,16 @@ def get_settings() -> dict:
     thresholds.setdefault("auto", 0.85)
     thresholds.setdefault("review_suggest", 0.60)
     me = dict(cfg.get("model_endpoints") or {})
+    # 0.1.5：向量模型独立配置（embedding_model 只读 host=SEM_HOST）；
+    # 图片扩展名（image_extensions）两引擎共用，缺省 16 个。
+    from common.embedding import load_embedding_config
+    from common.image_ext import get_image_exts
+    emb = load_embedding_config()
     model_endpoints = {
         "llm_host": me.get("llm_host") or os.environ.get("LLM_HOST") or DEFAULT_LLM_HOST,
-        "sem_host": me.get("sem_host") or os.environ.get("SEM_HOST") or DEFAULT_SEM_HOST,
+        "sem_host": emb["host"],
         "ocr_url": me.get("ocr_url") or os.environ.get("OCR_URL") or DEFAULT_OCR_URL,
+        "embedding_model": emb["model"],
     }
     inbox = dict(cfg.get("inbox") or {})
     schedule = {
@@ -143,6 +149,8 @@ def get_settings() -> dict:
         "excluded": cfg.get("excluded", []),
         "thresholds": thresholds,
         "model_endpoints": model_endpoints,
+        "embedding": {"host": emb["host"], "model": emb["model"]},
+        "image_extensions": sorted(get_image_exts()),
         "auto_apply": bool(auto_apply),
         "schedule": schedule,
         "_raw": cfg,  # 内部用：写回时以此为底
@@ -154,12 +162,69 @@ def public_settings() -> dict:
 
     0.1.3：附带 ocr_status（OCR 端点实时可达状态，供设置页/向导页显示；
     探活超时 1.5 秒，不可达时不阻塞返回）。
+    0.1.5：附带 embedding_status（向量模型端点探活 + 模型是否在列表里）
+    与 vision_status（SigLIP / ChineseCLIP 本地缓存状态；VLM 暂未接入）。
     """
     s = get_settings()
     s.pop("_raw", None)
     s["keys"] = masked_keys()
     s["ocr_status"] = probe_ocr((s.get("model_endpoints") or {}).get("ocr_url") or "")
+    emb = s.get("embedding") or {}
+    s["embedding_status"] = probe_embedding(
+        emb.get("host") or "", emb.get("model") or "")
+    s["vision_status"] = vision_status()
     return s
+
+
+def probe_embedding(host: str, model: str, timeout: float = 1.5) -> dict:
+    """向量模型端点探活：GET {host}/api/tags，看服务可达与模型是否在列表里。"""
+    import time
+    import urllib.error
+    import urllib.request
+    if not host:
+        return {"host": host, "model": model, "reachable": False,
+                "status": None, "has_model": False, "error": "未配置 endpoint"}
+    t0 = time.time()
+    try:
+        req = urllib.request.Request(host.rstrip("/") + "/api/tags", method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            body = json.loads(r.read().decode("utf-8", "replace"))
+            names = [m.get("name") for m in (body.get("models") or [])]
+            return {"host": host, "model": model, "reachable": True,
+                    "status": r.status, "has_model": model in names,
+                    "ms": int((time.time() - t0) * 1000)}
+    except urllib.error.HTTPError as e:
+        return {"host": host, "model": model, "reachable": True,
+                "status": e.code, "has_model": False,
+                "ms": int((time.time() - t0) * 1000)}
+    except Exception as e:
+        return {"host": host, "model": model, "reachable": False,
+                "status": None, "has_model": False,
+                "ms": int((time.time() - t0) * 1000), "error": type(e).__name__}
+
+
+def vision_status() -> dict:
+    """视觉模型状态：当前固定 SigLIP + ChineseCLIP（本地缓存打分）。
+
+    检查 media_core/config.json 的 model_dir 下两个快照目录是否存在；
+    视觉大模型（VLM）暂未接入，只留位置与说明。
+    """
+    cfg = load_media_config()
+    model_dir = cfg.get("model_dir") or ""
+    siglip = os.path.join(model_dir, "models--timm--ViT-B-16-SigLIP")
+    cnclip = os.path.join(model_dir, "models--OFA-Sys--chinese-clip-vit-base-patch16")
+    siglip_ok = bool(model_dir) and os.path.isdir(siglip)
+    cnclip_ok = bool(model_dir) and os.path.isdir(cnclip)
+    return {
+        "models": ["SigLIP ViT-B-16-SigLIP (webli)",
+                   "ChineseCLIP vit-base-patch16"],
+        "model_dir": model_dir,
+        "siglip_present": siglip_ok,
+        "cnclip_present": cnclip_ok,
+        "ready": siglip_ok and cnclip_ok,
+        "vlm": None,
+        "note": "视觉大模型（VLM）暂未接入；当前只用本地 SigLIP + ChineseCLIP 打分。",
+    }
 
 
 def probe_ocr(url: str, timeout: float = 1.5) -> dict:

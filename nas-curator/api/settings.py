@@ -29,6 +29,10 @@ class SettingsPutBody(BaseModel):
     thresholds: dict | None = None
     auto_apply: bool | None = None
     schedule: dict | None = None
+    # 0.1.5：向量模型（embedding: {"model": "..."}；host 只读，走 SEM_HOST，
+    # API 不接受 host）与图片扩展名（image_extensions: [".jpg", ...]）。
+    embedding: dict | None = None
+    image_extensions: list | None = None
 
 
 class KeyBody(BaseModel):
@@ -103,14 +107,39 @@ def put(body: SettingsPutBody):
         if "settle_minutes" in body.schedule:
             inbox["settle_minutes"] = int(body.schedule["settle_minutes"])
         changed.append("schedule")
+    if body.embedding is not None:
+        # 0.1.5：向量模型只接受 model；host 只读（SEM_HOST / model_endpoints.sem_host）。
+        from common.embedding import validate_embedding_model
+        if not isinstance(body.embedding, dict):
+            raise HTTPException(status_code=400, detail="embedding 须为对象")
+        try:
+            model = validate_embedding_model(body.embedding.get("model") or "")
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        cfg.setdefault("model_endpoints", {})["embedding_model"] = model
+        changed.append("embedding")
+    if body.image_extensions is not None:
+        # 0.1.5：图片扩展名两引擎共用，校验归一化（小写、补点、去重）。
+        from common.image_ext import validate_image_exts
+        try:
+            norm = validate_image_exts(body.image_extensions)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        cfg["image_extensions"] = norm
+        changed.append("image_extensions")
     if not changed:
         raise HTTPException(status_code=400,
-                            detail="未提供可更新字段（thresholds/auto_apply/schedule）")
+                            detail="未提供可更新字段（thresholds/auto_apply/schedule/embedding/image_extensions）")
     try:
         with open(LIBRARIES_JSON, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
     except OSError as e:
         raise HTTPException(status_code=500, detail=f"写回 libraries.json 失败：{e}")
+    # 写回后清两个模块的 mtime 缓存（同进程内立即生效；监听进程靠 mtime 重读）。
+    from common.embedding import clear_cache as _clear_emb_cache
+    from common.image_ext import clear_cache as _clear_img_cache
+    _clear_emb_cache()
+    _clear_img_cache()
     out = public_settings()
     out["updated"] = changed
     out["note"] = "库路径不允许经 API 修改，改路径须手动编辑 config/libraries.json。"

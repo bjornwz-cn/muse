@@ -53,6 +53,33 @@
   <button class="btn" type="button" id="btn-save-models">保存模型列表</button>
   <span class="muted" id="models-note"></span>
 </div>
+
+<h2>向量模型</h2>
+<p class="muted">向量模型只做语义预筛与聚类，不进语言调用链。默认 bge-m3，走 GPU（SEM_HOST）；本地 Ollama，无需 Key。</p>
+<div class="form-row">
+  <div class="field"><label>Endpoint（只读，环境变量优先）</label><input type="text" id="emb-host" readonly></div>
+  <div class="field"><label for="emb-model">模型</label><input type="text" id="emb-model" placeholder="bge-m3:latest"></div>
+</div>
+<p class="muted" id="emb-status"></p>
+<div class="btn-row">
+  <button class="btn" type="button" id="btn-save-emb">保存向量模型</button>
+  <span class="muted" id="emb-note"></span>
+</div>
+
+<h2>视觉模型</h2>
+<p class="muted">当前固定 SigLIP + ChineseCLIP（本地缓存打分）；视觉大模型（VLM）暂未接入。</p>
+<pre class="json" id="vision-pre">加载中…</pre>
+<p class="muted" id="vision-note"></p>
+
+<h2>图片扩展名</h2>
+<p class="muted">文档引擎与媒体引擎共用同一份配置；改后下轮扫描即生效，无需重启。缺省 16 个（含相机 raw 格式 .nef/.cr2/.arw/.dng 与 .jfif/.livp）。</p>
+<div class="form-row">
+  <div class="field"><label for="img-exts">图片扩展名（逗号分隔，小写带点）</label><input type="text" id="img-exts" placeholder=".jpg, .jpeg, .png, ..."></div>
+</div>
+<div class="btn-row">
+  <button class="btn" type="button" id="btn-save-imgext">保存图片扩展名</button>
+  <span class="muted" id="imgext-note"></span>
+</div>
 {% endblock %}
 {% block scripts %}
 <script>
@@ -118,6 +145,12 @@
     return 'OCR 服务：' + st.url + ' · 不可达' + (st.error ? '（' + st.error + '）' : '');
   }
 
+  function embText(st) {
+    if (!st || !st.host) return '向量模型：未配置';
+    if (st.reachable) return '向量模型：' + st.host + ' · 可达（HTTP ' + st.status + '，' + st.ms + 'ms）· 模型 ' + st.model + (st.has_model ? ' 已在列表' : ' 未在列表（请检查模型名是否已拉取）');
+    return '向量模型：' + st.host + ' · 不可达' + (st.error ? '（' + st.error + '）' : '');
+  }
+
   function collectModels() {
     var rows = document.querySelectorAll('#models-body .model-row');
     var out = [];
@@ -163,6 +196,16 @@
       document.getElementById('models-order').textContent = orderText(d.effective_order);
       document.getElementById('models-note').textContent =
         (d.models_source === 'file' ? '已保存过自定义列表' : '当前为默认列表（未保存过）');
+      var emb = d.embedding || {};
+      document.getElementById('emb-host').value = emb.host || '';
+      document.getElementById('emb-model').value = emb.model || '';
+      document.getElementById('emb-status').textContent = embText(d.embedding_status);
+      var vis = d.vision_status || {};
+      document.getElementById('vision-pre').textContent = JSON.stringify(vis, null, 2);
+      document.getElementById('vision-note').textContent =
+        vis.ready ? '视觉模型就绪（本地缓存完整）'
+          : '视觉模型缓存不完整（缺 ' + [!vis.siglip_present && 'SigLIP', !vis.cnclip_present && 'ChineseCLIP'].filter(Boolean).join('、') + '），图片打分将降级';
+      document.getElementById('img-exts').value = (d.image_extensions || []).join(', ');
     } catch (e) {
       C.showError(document.getElementById('settings-error'), e);
     }
@@ -225,6 +268,27 @@
       if (res.effective_order) document.getElementById('models-order').textContent = orderText(res.effective_order);
       document.getElementById('models-note').textContent = res.note || '已保存';
       C.toast('模型列表已保存（Key 只显掩码）');
+    } catch (e) {
+      C.toast('保存失败：' + e.message, true);
+    }
+  });
+  document.getElementById('btn-save-emb').addEventListener('click', async function () {
+    try {
+      var res = await C.api('/api/settings', { method: 'PUT', body: { embedding: { model: document.getElementById('emb-model').value.trim() } } });
+      document.getElementById('emb-status').textContent = embText(res.embedding_status);
+      document.getElementById('emb-note').textContent = '已保存（下轮任务即用新模型）';
+      C.toast('向量模型已保存');
+    } catch (e) {
+      C.toast('保存失败：' + e.message, true);
+    }
+  });
+  document.getElementById('btn-save-imgext').addEventListener('click', async function () {
+    try {
+      var list = document.getElementById('img-exts').value.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+      var res = await C.api('/api/settings', { method: 'PUT', body: { image_extensions: list } });
+      document.getElementById('img-exts').value = (res.image_extensions || []).join(', ');
+      document.getElementById('imgext-note').textContent = '已保存（下轮扫描即生效）';
+      C.toast('图片扩展名已保存');
     } catch (e) {
       C.toast('保存失败：' + e.message, true);
     }

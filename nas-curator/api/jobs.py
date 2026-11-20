@@ -70,6 +70,9 @@ def _plan_namespace(body: CreateJobBody, root: str, db_path: str) -> argparse.Na
     NAS 上的 ollama-cpu :11434 / ollama-gpu :11500 / ocr-service :8866。
     """
     me = get_settings().get("model_endpoints") or {}
+    # 0.1.5：向量模型名改走设置页配置（common.embedding），不再写死 bge-m3
+    from common.embedding import load_embedding_config
+    sem_model = load_embedding_config().get("model") or "bge-m3:latest"
     return argparse.Namespace(
         db=db_path, root=root, library=body.library or "", kind="document",
         out="", rules="", media_config="",
@@ -79,7 +82,7 @@ def _plan_namespace(body: CreateJobBody, root: str, db_path: str) -> argparse.Na
         rename=bool(body.rename), rename_llm=False,
         llm=bool(body.use_llm), llm_host=me.get("llm_host") or "http://172.17.0.1:11434",
         llm_model="qwen3:4b", llm_min_conf=0.55, llm_max=2000,
-        sem=bool(body.use_sem), sem_model="bge-m3:latest",
+        sem=bool(body.use_sem), sem_model=sem_model,
         sem_min_sim=0.42, sem_margin=0.02,
     )
 

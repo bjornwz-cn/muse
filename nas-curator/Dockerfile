@@ -10,7 +10,7 @@ FROM python:3.12-slim AS base
 
 LABEL org.opencontainers.image.title="NAS Curator" \
       org.opencontainers.image.description="文件管家：统一整理 NAS 文档与媒体库（飞牛 App）" \
-      org.opencontainers.image.version="0.1.4"
+      org.opencontainers.image.version="0.1.5"
 
 # 文档抽取依赖（二进制工具，P1 实测口径）：
 #   poppler-utils -> pdftotext（PDF 文本抽取；缺失时走远程 OCR 服务）

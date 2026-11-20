@@ -38,6 +38,11 @@ import os
 import subprocess
 import time
 
+try:
+    from ..common.image_ext import DEFAULT_IMAGE_EXTS, get_image_exts
+except Exception:  # noqa: BLE001 - 平铺导入时退化为绝对导入
+    from common.image_ext import DEFAULT_IMAGE_EXTS, get_image_exts
+
 SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CFG_PATH = os.environ.get('MEDIA_CURATOR_CONFIG') or os.path.join(SKILL_DIR, 'config.json')
 
@@ -55,12 +60,19 @@ try:
 except Exception:
     pass
 
-IMG_EXT = {'.jpg', '.jpeg', '.png', '.heic', '.heif', '.gif', '.bmp', '.webp',
-           '.tif', '.tiff', '.jfif', '.nef', '.cr2', '.arw', '.dng', '.livp'}
+# 0.1.5：图片扩展名改由配置（config/libraries.json image_extensions）统一管理，
+# 文档引擎与媒体引擎共用同一份；缺省为两处旧硬编码列表的并集（16 个）。
+# IMG_EXT / MEDIA_EXTS 保留为缺省快照（兼容旧导入）；判定逻辑一律调函数。
+IMG_EXT = DEFAULT_IMAGE_EXTS
 VID_EXT = {'.mp4', '.mov', '.m4v', '.avi', '.mkv', '.wmv', '.flv', '.3gp', '.mpg',
            '.mpeg', '.mts', '.m2ts', '.webm', '.insv', '.vob', '.rmvb'}
 # 照片 + 视频扩展名全集：与 is_media() 的判定完全一致；统一 CLI 用它收集媒体路径。
 MEDIA_EXTS = frozenset(IMG_EXT | VID_EXT)
+
+
+def media_exts():
+    """照片 + 视频扩展名全集（随图片配置动态变化）。"""
+    return frozenset(get_image_exts() | VID_EXT)
 PROXY_EXT = {'.lrv'}                      # 视频代理文件，不纳入
 SKIP_NAMES = {'.DS_Store', 'Thumbs.db', 'desktop.ini', '.directory', '@eaDir', '#recycle'}
 
@@ -167,7 +179,7 @@ def is_media(name):
     ext = os.path.splitext(name)[1].lower()
     if ext in PROXY_EXT:
         return None
-    if ext in IMG_EXT:
+    if ext in get_image_exts():
         return '照片'
     if ext in VID_EXT:
         return '视频'

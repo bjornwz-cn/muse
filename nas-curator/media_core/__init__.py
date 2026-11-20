@@ -36,6 +36,8 @@ from .curate import (
     Classifier,
     decide,
     ensure_cv2_first,
+    get_image_exts,
+    media_exts,
     rebuild_index,
 )
 from .engine import build_classifier, plan_inbox, plan_media_files
@@ -52,5 +54,7 @@ __all__ = [
     "MEDIA_EXTS",
     "IMG_EXT",
     "VID_EXT",
+    "get_image_exts",
+    "media_exts",
     "ensure_cv2_first",
 ]

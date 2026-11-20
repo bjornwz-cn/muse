@@ -117,18 +117,25 @@ def _setup_llm(args):
 
 
 def _setup_sem(args, rules):
-    """建语义分类器 + 预筛（fit 较重，进程内只建一次）。"""
+    """建语义分类器 + 预筛（fit 较重，进程内只建一次）。
+
+    0.1.5：向量模型名改走设置页配置（common.embedding）；命令行
+    --sem-model 显式给值仍优先。
+    """
     if not getattr(args, "sem", False):
         return None, None
+    from common.embedding import load_embedding_config
     from curator_core import Prescreener, SemanticClassifier
+    sem_model = getattr(args, "sem_model", None) or \
+        load_embedding_config().get("model")
     sem = SemanticClassifier(
         os.environ.get("SEM_HOST", "http://172.17.0.1:11500"),
-        getattr(args, "sem_model", "bge-m3:latest"),
+        sem_model,
         min_sim=getattr(args, "sem_min_sim", 0.42),
         min_margin=getattr(args, "sem_margin", 0.02),
         self_names=(rules.get("self_names") or ()) if rules else ())
     if not sem.alive():
-        print("！语义模型不可用（bge-m3），跳过向量分类")
+        print(f"！语义模型不可用（{sem_model}），跳过向量分类")
         return None, None
     n = sem.fit(rules)
     print(f"语义空间就绪：{n} 个类目向量")
@@ -139,7 +146,7 @@ def _setup_sem(args, rules):
         except TypeError:
             prescreener = Prescreener()
         prescreener.fit(rules)
-        print("预筛层就绪（bge-m3，sim≥0.75 且 margin≥0.10 直接定类）")
+        print(f"预筛层就绪（{sem_model}，sim≥0.75 且 margin≥0.10 直接定类）")
     return sem, prescreener
 
 
@@ -430,7 +437,7 @@ def _collect_media_paths(root):
     P2(P1.1)：跳过 node_modules 目录与 TypeScript 声明文件 .d.mts
     （.mts 扩展名与 AVCHD 视频碰撞，146 个 node_modules 文件曾被误当视频抽帧）。
     """
-    from media_core import MEDIA_EXTS
+    from media_core import media_exts
     out = []
     for dp, dns, fns in os.walk(root):
         dns[:] = [d for d in dns
@@ -438,7 +445,7 @@ def _collect_media_paths(root):
         for fn in fns:
             if fn.lower().endswith(".d.mts"):
                 continue
-            if os.path.splitext(fn)[1].lower() in MEDIA_EXTS:
+            if os.path.splitext(fn)[1].lower() in media_exts():
                 out.append(os.path.join(dp, fn))
     return sorted(out)
 
@@ -626,9 +633,9 @@ def _plan_single_file(path, args, cfg, db_conn=None):
     媒体：走媒体引擎。P1 单文件只做规则层（不走 sem/LLM/预筛），改名逻辑亦不做
     （target_name 即原名）；批量 plan 才走完整判定链。
     """
-    from media_core import MEDIA_EXTS
+    from media_core import media_exts
     ext = os.path.splitext(path)[1].lower()
-    if ext in MEDIA_EXTS:
+    if ext in media_exts():
         from media_core import engine as ME
         media_root = _library_root(cfg, "media", "")
         classifier, mcfg = _build_media_classifier(args)
@@ -918,7 +925,9 @@ def _add_plan_args(p):
     p.add_argument("--llm-min-conf", type=float, default=0.55)
     p.add_argument("--llm-max", type=int, default=2000)
     p.add_argument("--sem", action="store_true")
-    p.add_argument("--sem-model", default="bge-m3:latest")
+    # 0.1.5：--sem-model 缺省 None，改走设置页配的向量模型（common.embedding）；
+    # 命令行显式给值仍优先。
+    p.add_argument("--sem-model", default=None)
     p.add_argument("--sem-min-sim", type=float, default=0.42)
     p.add_argument("--sem-margin", type=float, default=0.02)
     return p

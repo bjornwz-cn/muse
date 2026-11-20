@@ -45,12 +45,22 @@
     }).join('');
   }
 
+  // 0.1.5：文件路径是 /vol1/1000 下的绝对路径时，渲染为可点击的预览链接
+  // （图片/PDF 内联看，其余下载）；不是该前缀的路径只显示文本。
+  function fileLink(path) {
+    if (!path || path.indexOf('/vol1/1000') !== 0) return C.esc(path || '');
+    return '<a class="file-link" target="_blank" rel="noopener" href="/api/file/preview?path=' +
+      encodeURIComponent(path) + '">' + C.esc(path) + '</a>';
+  }
+
   function itemHtml(it) {
     var p = it.payload || {};
+    var src = p.src || it.src || '';
     return '<article class="review-item" data-id="' + C.esc(it.id) + '">' +
+      '<p class="review-note">需要你决定：' + C.esc(it.review_note || '请看一眼再决定') + '</p>' +
       '<div class="head">' +
         '<input type="checkbox" class="review-check" value="' + C.esc(it.id) + '" aria-label="选中此条">' +
-        '<span class="path">' + C.esc(p.src || it.src || '') + '</span>' +
+        '<span class="path">' + fileLink(src) + '</span>' +
         C.kindTag(it.kind) +
       '</div>' +
       '<div style="margin-top:8px;display:flex;gap:16px;flex-wrap:wrap;align-items:center">' +
@@ -60,7 +70,7 @@
       '<p style="margin:8px 0 0">' + C.esc(p.reason || '') + '</p>' +
       '<p style="margin:4px 0 0">当前所在：<strong>' + C.esc(it.current_top || '—') + '</strong>' +
       (it.kind === 'dup' ? ' · 批准后移入 06-重复待确认区（不删除，可找回）' : '') + '</p>' +
-      (p.evidence ? '<p class="evidence" style="margin:4px 0 0">依据：' + C.esc(p.evidence) + '</p>' : '') +
+      (p.evidence ? '<p class="evidence" style="margin:4px 0 0">依据：' + fileLink(p.evidence) + '</p>' : '') +
       (p.suggested_dst ? '<p class="dst" style="margin:4px 0 0">建议目标：' + C.esc(p.suggested_dst) + '</p>' : '') +
       '<div class="review-edit">' +
         '<div><label>改分类</label><select class="edit-category inline-input">' + categoryOptions(it.current_top) + '</select></div>' +

@@ -1,5 +1,5 @@
 appname               = nas-curator
-version               = 0.1.4
+version               = 0.1.5
 display_name          = NAS Curator 文件管家
 desc                  = 统一整理 NAS 文档与媒体库：规则内自动分类存放、自动改名、打标签，减少人工操作。一个统一收件箱，自动判断归工作、家庭、媒体哪一类。首次打开应用时有三步安装向导（库路径、模型端点、定时与自动执行）。
 platform              = x86

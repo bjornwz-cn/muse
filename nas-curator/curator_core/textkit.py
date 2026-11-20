@@ -20,15 +20,33 @@ import subprocess
 import zipfile
 from collections import Counter
 
+try:
+    from ..common.image_ext import DEFAULT_IMAGE_EXTS, get_image_exts
+except Exception:  # noqa: BLE001 - 平铺导入时退化为绝对导入
+    from common.image_ext import DEFAULT_IMAGE_EXTS, get_image_exts
+
 TEXT_EXT = {".txt", ".md", ".csv", ".tsv", ".json", ".xml", ".log", ".ini", ".yaml", ".yml",
             ".html", ".htm", ".srt", ".ass", ".py", ".sh", ".js", ".sql", ".bat", ".ps1"}
 OOXML_EXT = {".docx", ".xlsx", ".pptx", ".docm", ".xlsm"}
 OLE_EXT = {".doc", ".xls", ".ppt"}
-IMG_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp", ".gif", ".heic", ".heif"}
+# 0.1.5：图片扩展名改由配置（config/libraries.json image_extensions）统一管理，
+# 文档引擎与媒体引擎共用同一份；缺省为两处旧硬编码列表的并集（16 个）。
+# IMG_EXT / NEED_TEXT 保留为缺省快照（兼容旧导入）；判定逻辑一律调函数。
+IMG_EXT = DEFAULT_IMAGE_EXTS
 MAIL_EXT = {".eml", ".msg"}
 ARCHIVE_EXT = {".zip", ".rar", ".7z", ".tar", ".gz", ".tgz"}
 AV_EXT = {".mp4", ".mov", ".mkv", ".avi", ".mp3", ".wav", ".flac", ".m4a"}
 NEED_TEXT = TEXT_EXT | OOXML_EXT | OLE_EXT | IMG_EXT | {".pdf"} | MAIL_EXT
+
+
+def image_exts():
+    """图片扩展名 + PDF（inventory 的 images 计数用，随配置动态变化）。"""
+    return get_image_exts() | {".pdf"}
+
+
+def need_text_exts():
+    """需抽正文的扩展名集合（随图片配置动态变化）。"""
+    return TEXT_EXT | OOXML_EXT | OLE_EXT | get_image_exts() | {".pdf"} | MAIL_EXT
 
 NOISE_LINE = re.compile(
     r"^(第?\s*\d+\s*页|page\s*\d+|\d+\s*/\s*\d+|机密|内部资料|confidential|"
@@ -332,7 +350,7 @@ def extract_text(path, ext=None, max_chars=3000, ocr_url=None,
         t = eml_text(path, max_chars) if ext == ".eml" else msg_text(path, max_chars)
         return t, ("eml" if ext == ".eml" else "msg") if t else "empty"
 
-    if ext in IMG_EXT:
+    if ext in get_image_exts():
         if allow_ocr:
             t = ocr_file(path, ocr_url, ocr_timeout, max_chars)
             if t:
@@ -549,7 +567,7 @@ def dir_digest(path, max_files=400, max_depth=2):
     texts = []
     for p in samples[:40]:
         ext = os.path.splitext(p)[1].lower()
-        if ext in NEED_TEXT - IMG_EXT:
+        if ext in need_text_exts() - get_image_exts():
             t, _ = extract_text(p, ext, 800, allow_ocr=False)
             if t:
                 texts.append(t)

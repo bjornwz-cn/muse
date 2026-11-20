@@ -44,6 +44,15 @@ DEFAULT_HOST = "http://172.17.0.1:11434"
 DEFAULT_MODEL = "qwen3:4b"
 DEFAULT_EMBED = "bge-m3:latest"
 
+
+def _configured_embed_model() -> str:
+    """0.1.5：设置页配的向量模型（common.embedding）；读不到/非法回缺省。"""
+    try:
+        from common.embedding import load_embedding_config
+        return load_embedding_config().get("model") or DEFAULT_EMBED
+    except Exception:  # noqa: BLE001
+        return DEFAULT_EMBED
+
 ARK_BASE_PLAN = "https://ark.cn-beijing.volces.com/api/plan/v3"
 ARK_BASE_PAYG = "https://ark.cn-beijing.volces.com/api/v3"
 
@@ -117,7 +126,7 @@ def _providers_from_legacy(cfg):
             out.append({"name": "local", "kind": "ollama",
                         "base_url": p.get("base_url") or DEFAULT_HOST,
                         "model": p.get("model") or DEFAULT_MODEL,
-                        "embed_model": p.get("embed_model") or DEFAULT_EMBED,
+                        "embed_model": p.get("embed_model") or _configured_embed_model(),
                         "billing": "free",
                         "timeout": p.get("timeout") or 25})
             continue
@@ -136,7 +145,7 @@ def _providers_from_legacy(cfg):
                     "timeout": p.get("timeout") or 30})
     if not any(p["kind"] == "ollama" for p in out):
         out.append({"name": "local", "kind": "ollama", "base_url": DEFAULT_HOST,
-                    "model": DEFAULT_MODEL, "embed_model": DEFAULT_EMBED,
+                    "model": DEFAULT_MODEL, "embed_model": _configured_embed_model(),
                     "billing": "free", "timeout": 25})
     return out
 
@@ -177,7 +186,7 @@ def _providers_from_models(models):
             out.append({"name": mid, "kind": "ollama",
                         "base_url": (m.get("base_url") or DEFAULT_HOST).rstrip("/"),
                         "model": m.get("model") or DEFAULT_MODEL,
-                        "embed_model": m.get("embed_model") or DEFAULT_EMBED,
+                        "embed_model": m.get("embed_model") or _configured_embed_model(),
                         "billing": "free",
                         "timeout": m.get("timeout") or 25})
         elif t == "custom":
@@ -244,12 +253,13 @@ def _load_config():
 
 
 class LLM:
-    def __init__(self, host=DEFAULT_HOST, model=DEFAULT_MODEL, embed_model=DEFAULT_EMBED,
+    def __init__(self, host=DEFAULT_HOST, model=DEFAULT_MODEL, embed_model=None,
                  timeout=25, providers=None):
         # host/model 保留为本地兜底参数，兼容 v2 调用签名
+        # 0.1.5：embed_model 缺省 None 时改走设置页配的向量模型（common.embedding）
         self._local_host = (host or DEFAULT_HOST).rstrip("/")
         self._local_model = model or DEFAULT_MODEL
-        self.embed_model = embed_model or DEFAULT_EMBED
+        self.embed_model = embed_model or _configured_embed_model()
         self.timeout = timeout
         self.providers = providers if providers is not None else _load_config()
         for p in self.providers:

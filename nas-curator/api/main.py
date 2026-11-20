@@ -1,6 +1,7 @@
 """api.main —— NAS Curator FastAPI 入口。
 
-挂载 6 个路由模块（dashboard / review / jobs / browse / rules / settings）。
+挂载 7 个路由模块（dashboard / review / jobs / browse / rules / settings /
+files：0.1.5 文件预览）。
 Jinja2 模板目录 ../web/templates、静态目录 ../web/static：P2 前端未落盘时
 不存在，届时根路由 / 返回内置极简总览页；模板到位后自动改走模板。
 DB 路径：环境变量 CURATOR_DB，否则项目 data/nas-curator.db（与 CLI 默认一致）。
@@ -18,7 +19,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from common import db as DB
-from . import browse, dashboard, jobs, review, rules, settings, upgrade, wizard
+from . import browse, dashboard, files, jobs, review, rules, settings, upgrade, wizard
 from .deps import ensure_config, get_db_path, is_setup_done
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -49,7 +50,8 @@ def create_app() -> FastAPI:
     app = FastAPI(title="NAS Curator", version="0.2.0", lifespan=lifespan)
     app.add_middleware(SetupRedirectMiddleware)
 
-    for mod in (dashboard, review, jobs, browse, rules, settings, upgrade, wizard):
+    for mod in (dashboard, review, jobs, browse, rules, settings, upgrade,
+                wizard, files):
         app.include_router(mod.router)
 
     if os.path.isdir(STATIC_DIR):

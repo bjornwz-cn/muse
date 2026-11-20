@@ -29,6 +29,17 @@ MEDIA_VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".mpg", ".mpeg",
 
 DUP_CATEGORY = "99-待确认/06-重复待确认"
 
+# 0.1.5：每条复核按 kind 给一句白话“需要你决定什么”（放卡片顶部）。
+REVIEW_NOTES = {
+    "dup": "这份与另一份内容完全一样，批准即移到重复待确认区，不删",
+    "low_conf": "系统没把握、置信度低，请确认分到哪类",
+    "blur": "图太糊判不准，请看一眼",
+    "ambiguous": "像两类，请选一个",
+    "sensitive": "可能含敏感内容，请确认",
+    "shell": "空壳文件（内容极小或已损坏），请确认如何处理",
+}
+DEFAULT_REVIEW_NOTE = "请看一眼再决定"
+
 
 def _roots() -> dict:
     """libraries.json -> {top_id: root}（库根缺失时返回空 dict，行为退化为旧口径）。"""
@@ -78,6 +89,7 @@ def _enrich(rows) -> list:
         top = RT.library_top(p.get("src") or "", roots)
         d["current_top"] = RT.top_label(top)
         d["current_top_id"] = top or ""
+        d["review_note"] = REVIEW_NOTES.get(d.get("kind"), DEFAULT_REVIEW_NOTE)
         out.append(d)
     return out
 
