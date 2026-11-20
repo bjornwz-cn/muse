@@ -3,9 +3,10 @@
 #
 # 由 systemd timer 每分钟跑的 upgrade-watcher.sh 触发；绝不在容器内运行
 # （容器不能重启自己，也不挂 docker socket）。
-# 流程：读请求 → 拉代码（git）→ 构建新镜像 → 备份数据库 → 换 compose 重建
-#       → 验证（healthy + 六页 200 + 链顺序与 OCR 探针）→ 任一步失败则用上一版
-#       镜像重建回滚。升级只在他点「一键升级」按钮时触发，绝不自动执行。
+# 流程：读请求 → 取代码（VM 同步暂存优先，git 拉取作后备）→ 构建新镜像 →
+#       备份数据库 → 换 compose 重建 → 验证（healthy + 六页 200 + 链顺序与
+#       OCR 探针）→ 任一步失败则用上一版镜像重建回滚。升级只在他点「一键升级」
+#       按钮时触发，绝不自动执行。
 #
 # 用法：upgrade.sh [--dry-run]
 #   --dry-run 只做到构建镜像成功为止（拉代码 + 构建），不动容器、不动 DB、
@@ -42,7 +43,7 @@ try:
         data = json.load(f)
 except Exception:
     pass
-finished = data.get("finished_at", "")
+finished = ""
 if state in ("done", "failed", "dry-run-ok"):
     finished = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
 data.update({"state": state, "stage": stage, "message": message,
@@ -154,28 +155,55 @@ main() {
   log "升级 $CURRENT → $TARGET（dry-run=$DRY_RUN）"
   status_write "running" "fetch" "开始拉取最新代码" "" "false"
 
-  # ---- 1. 拉代码（git；raw.githubusercontent.com 在 NAS 出站不通，见报告）----
-  rm -rf "$WORKDIR/repo"
-  if ! git clone --depth 1 --filter=blob:none --sparse "$REPO" "$WORKDIR/repo" >> "$logfile" 2>&1; then
-    fail "fetch" "git clone 失败（见 $logfile）"
-  fi
-  if ! git -C "$WORKDIR/repo" sparse-checkout set nas-curator >> "$logfile" 2>&1; then
-    log "sparse-checkout 失败，改全量浅克隆"
+  # ---- 1. 取代码：优先用 VM 已同步的暂存目录；没有或版本不对时改试 git 拉取 ----
+  # NAS 直连 GitHub 不可靠（见 0.1.4 报告：clone 常因 HTTP/2 中断或连接超时
+  # 失败；muse 仓 .git 达 87MB），因此主路径是 VM 侧 cron 每小时同步好的代码
+  # （/vol2/@appshare/nas-curator/upgrade-work/stage，见 scripts/sync-code-to-nas.sh）。
+  SRC_DIR=""
+  local staged_version
+  staged_version=$(python3 -c "import json; print(json.load(open('$WORKDIR/stage/VERSION'))['version'])" 2>/dev/null || echo "")
+  if [ "$staged_version" = "$TARGET" ]; then
+    SRC_DIR="$WORKDIR/stage"
+    log "使用 VM 已同步的代码（版本 $TARGET）"
+  else
+    log "暂存目录版本为 ${staged_version:-无}，改试 git 拉取"
     rm -rf "$WORKDIR/repo"
-    git clone --depth 1 "$REPO" "$WORKDIR/repo" >> "$logfile" 2>&1 \
-      || fail "fetch" "git clone（全量）失败（见 $logfile）"
+    local attempt
+    for attempt in 1 2; do
+      if git -c http.version=HTTP/1.1 clone --depth 1 --filter=blob:none --sparse \
+          "$REPO" "$WORKDIR/repo" >> "$logfile" 2>&1 \
+          && git -C "$WORKDIR/repo" sparse-checkout set nas-curator >> "$logfile" 2>&1; then
+        break
+      fi
+      log "git clone 第 $attempt 次失败，5 秒后重试"
+      rm -rf "$WORKDIR/repo"
+      sleep 5
+    done
+    local fetched
+    fetched=$(python3 -c "import json; print(json.load(open('$WORKDIR/repo/nas-curator/VERSION'))['version'])" 2>/dev/null || echo "")
+    if [ "$fetched" = "$TARGET" ]; then
+      SRC_DIR="$WORKDIR/repo/nas-curator"
+      log "git 拉取成功，版本 $TARGET"
+    else
+      fail "fetch" "NAS 上没有目标版本 $TARGET 的代码（暂存目录版本 ${staged_version:-无}，git 拉取到的版本 ${fetched:-无}；VM 同步每小时一次，请稍后再试）"
+    fi
   fi
-  local fetched
-  fetched=$(python3 -c "import json; print(json.load(open('$WORKDIR/repo/nas-curator/VERSION'))['version'])" 2>/dev/null || echo "")
-  [ "$fetched" = "$TARGET" ] || fail "fetch" "拉到的版本是 $fetched，与请求目标 $TARGET 不一致"
-  log "已拉到 $TARGET"
 
-  # ---- 2. 构建新镜像 ----
+  # ---- 2. 构建新镜像（NAS 出站下载常抖动：单次构建限时 15 分钟，失败重试一次）----
   status_write "running" "build" "构建新镜像 nas-curator:$TARGET" "" "false"
-  if ! $DOCKER build -t "$IMAGE_PREFIX:$TARGET" \
-      --build-arg PIP_EXTRA_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
-      "$WORKDIR/repo/nas-curator" >> "$logfile" 2>&1; then
-    fail "build" "镜像构建失败（见 $logfile）"
+  local build_ok="false"
+  local attempt
+  for attempt in 1 2; do
+    if timeout -k 30 900 $DOCKER build -t "$IMAGE_PREFIX:$TARGET" \
+        --build-arg PIP_EXTRA_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
+        "$SRC_DIR" >> "$logfile" 2>&1; then
+      build_ok="true"
+      break
+    fi
+    log "镜像构建第 $attempt 次失败（见 $logfile），准备重试"
+  done
+  if [ "$build_ok" != "true" ]; then
+    fail "build" "镜像构建失败（两次尝试均未完成，见 $logfile）"
   fi
   log "镜像 nas-curator:$TARGET 构建成功"
   if [ "$DRY_RUN" = "true" ]; then
@@ -203,7 +231,7 @@ main() {
 
   # ---- 4. 换 compose 并重建 ----
   status_write "running" "deploy" "替换 compose 并重建容器" "" "false"
-  local new_compose="$WORKDIR/repo/nas-curator/fpk/app/docker/docker-compose.yaml"
+  local new_compose="$SRC_DIR/fpk/app/docker/docker-compose.yaml"
   grep -q "image: $IMAGE_PREFIX:$TARGET" "$new_compose" \
     || fail "deploy" "新 compose 里镜像不是 $IMAGE_PREFIX:$TARGET"
   [ -f "$APPDIR/docker-compose.yaml.$OLD-bak" ] \

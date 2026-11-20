@@ -24,10 +24,14 @@ RUN apt-get update \
 
 # Python 依赖：torch 用 CPU index（不带 CUDA/nvidia 大包），其余走 PyPI。
 # 版本锁见 requirements-image.lock（由安装脚本生成）。
+# 0.1.4：torch 主源改用阿里云 pytorch-wheels 镜像——download.pytorch.org
+# （经 download-r2.pytorch.org）在 NAS 出站方向两次下载 209MB 的 torch 轮子
+# 均卡住不动（11 分钟无进展），而阿里云同文件实测 14.6MB/s。
+# 其余包仍走 --extra-index-url（阿里云 PyPI）。
 ARG PIP_EXTRA_INDEX_URL=https://pypi.org/simple/
 COPY requirements-image.txt /tmp/requirements-image.txt
 RUN pip install --no-cache-dir \
-      --index-url https://download.pytorch.org/whl/cpu \
+      --index-url https://mirrors.aliyun.com/pytorch-wheels/cpu \
       --extra-index-url ${PIP_EXTRA_INDEX_URL} \
       -r /tmp/requirements-image.txt \
  && rm -f /tmp/requirements-image.txt

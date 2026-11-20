@@ -264,7 +264,8 @@ def test_dashboard_includes_version(client):
 
 def test_upgrade_shell_scripts_syntax():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    for name in ("scripts/upgrade.sh", "scripts/upgrade-watcher.sh"):
+    for name in ("scripts/upgrade.sh", "scripts/upgrade-watcher.sh",
+                 "scripts/sync-code-to-nas.sh"):
         p = os.path.join(root, name)
         r = subprocess.run(["bash", "-n", p], capture_output=True, text=True)
         assert r.returncode == 0, f"{name} 语法错误：{r.stderr}"
