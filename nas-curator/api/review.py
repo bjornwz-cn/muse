@@ -9,6 +9,12 @@ approved 时：
 - 下拉「改分类」改了顶层（工作/家庭/媒体）时重算 dst：有 suggested_dst
   则只换库根，否则按新顶层默认一级目录落点；下拉未改则沿用原建议。
 rejected：只改状态。绝不删除文件。
+
+0.1.6 文件夹级复核：GET /api/review/folders 按文件夹分组返回
+（同一文件夹 = 库根下第一级目录，通用容器如 下载 下钻一级，
+见 common.routing.review_folder_for）；POST /api/review/folders/approve
+与 /reject 对文件夹下全部待复核项逐条走 decide_one（改顶层复用
+_recompute_dst_for_top，dup 仍按 holding 区规则）。
 """
 from __future__ import annotations
 
@@ -100,6 +106,84 @@ class DecideBody(BaseModel):
     new_name: str | None = None
     tags: list[str] | None = None
     suggested_dst: str | None = None
+
+
+class FolderDecideBody(BaseModel):
+    folder: str  # 分组键 "<top>:<rel_folder>"（见 review_folder_for）
+    category: str | None = None  # 整包改顶层（工作/家庭/媒体…）；不填则沿用各条原建议
+    tags: list[str] | None = None
+    kind: str | None = None  # 只裁定该 kind；不填则整包全部 kind
+
+
+def _group_rows(rows) -> list:
+    """复核行按文件夹分组（0.1.6）：同一文件夹合并为一组，组内保留单条明细
+    （前端点开展开逐条处理）。组顺序按首条出现顺序；新入库的项下次列表
+    即按同一口径分组，无需额外状态。"""
+    roots = _roots()
+    groups: dict[str, dict] = {}
+    order: list[str] = []
+    for r in _enrich(rows):
+        p = r.get("payload") if isinstance(r.get("payload"), dict) else {}
+        key, top, rel, display = RT.review_folder_for(p.get("src") or "", roots)
+        g = groups.get(key)
+        if g is None:
+            g = {"folder": key, "top": top or "", "top_label": RT.top_label(top),
+                 "path": rel, "display": display, "count": 0, "kinds": {},
+                 "items": []}
+            groups[key] = g
+            order.append(key)
+        g["count"] += 1
+        g["kinds"][r.get("kind")] = g["kinds"].get(r.get("kind"), 0) + 1
+        g["items"].append(r)
+    return [groups[k] for k in order]
+
+
+def _folder_rows(conn, folder: str, status: str, kind: str | None) -> list:
+    """取某文件夹下符合状态/类型的复核行 id（与 _group_rows 同一口径算
+    folder_key；整包裁定只对 status='pending' 的行生效）。"""
+    if status == "all":
+        sql = "SELECT * FROM review_queue"
+        args: list = []
+        if kind:
+            sql += " WHERE kind=?"
+            args.append(kind)
+        sql += " ORDER BY id"
+        rows = conn.execute(sql, args).fetchall()
+    else:
+        rows = DB.list_review(conn, status=status, kind=kind or None)
+    roots = _roots()
+    ids = []
+    for r in _enrich(rows):
+        p = r.get("payload") if isinstance(r.get("payload"), dict) else {}
+        if RT.review_folder_for(p.get("src") or "", roots)[0] == folder:
+            ids.append(r["id"])
+    return ids
+
+
+def _folder_decide(conn, body: FolderDecideBody, decision: str) -> dict:
+    """整包裁定（0.1.6）：文件夹下全部待复核项逐条走 decide_one——改顶层
+    复用单条的 _recompute_dst_for_top（只换库根、子路径保留），dup 仍按
+    holding 区规则、不受改顶层影响；拒绝只改状态、不动文件。"""
+    folder = (body.folder or "").strip()
+    if not folder:
+        raise HTTPException(status_code=400, detail="folder 不能为空")
+    if body.category and body.category not in RT.LABEL_TO_TOP:
+        raise HTTPException(status_code=400,
+                            detail="category 须为 工作/家庭/媒体/收件箱/笔记本备份")
+    if body.kind and body.kind not in REVIEW_NOTES:
+        raise HTTPException(status_code=400, detail="kind 非法")
+    ids = _folder_rows(conn, folder, "pending", body.kind or None)
+    results = []
+    for rid in ids:
+        try:
+            decide_body = DecideBody(decision=decision, category=body.category,
+                                     tags=body.tags)
+            results.append(decide_one(conn, rid, decision, decide_body))
+        except HTTPException as e:
+            results.append({"ok": False, "id": rid, "moved": False,
+                            "note": e.detail})
+    return {"folder": folder, "decision": decision, "total": len(ids),
+            "results": results}
 
 
 class BulkBody(BaseModel):
@@ -236,6 +320,35 @@ def list_review(status: str = "pending", kind: str | None = None,
     if status not in ("pending", "approved", "rejected"):
         raise HTTPException(status_code=400, detail="status 须为 pending|approved|rejected|all")
     return _enrich(DB.list_review(conn, status=status, kind=kind or None))
+
+
+@router.get("/folders")
+def list_folders(status: str = "pending", kind: str | None = None,
+                 conn=Depends(get_db)):
+    """0.1.6：复核队列按文件夹分组返回（组内含单条明细；status=all 用于
+    对已裁定行验证分组逻辑，不动任何状态）。"""
+    if status == "all":
+        sql = "SELECT * FROM review_queue"
+        args: list = []
+        if kind:
+            sql += " WHERE kind=?"
+            args.append(kind)
+        sql += " ORDER BY id"
+        rows = conn.execute(sql, args).fetchall()
+        return _group_rows(rows)
+    if status not in ("pending", "approved", "rejected"):
+        raise HTTPException(status_code=400, detail="status 须为 pending|approved|rejected|all")
+    return _group_rows(DB.list_review(conn, status=status, kind=kind or None))
+
+
+@router.post("/folders/approve")
+def folder_approve(body: FolderDecideBody, conn=Depends(get_db)):
+    return _folder_decide(conn, body, "approved")
+
+
+@router.post("/folders/reject")
+def folder_reject(body: FolderDecideBody, conn=Depends(get_db)):
+    return _folder_decide(conn, body, "rejected")
 
 
 @router.post("/{review_id}/decide")

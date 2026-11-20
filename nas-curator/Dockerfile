@@ -1,4 +1,4 @@
-# NAS Curator（文件管家）0.1.4 —— 飞牛 App 容器镜像
+# NAS Curator（文件管家）0.1.6 —— 飞牛 App 容器镜像
 # 多架构：amd64 + arm64（buildx 构建；本次 VM 沙箱无法启动容器，
 # 实际产物由手工组装脚本按同一份依赖清单生成，见 scripts/assemble-image.sh）。
 # 底镜像 python:3.12-slim（与 P1/P2 实测的 Python 3.12 一致）。
@@ -8,9 +8,10 @@
 ARG PIP_EXTRA_INDEX_URL=https://pypi.org/simple/
 FROM python:3.12-slim AS base
 
-LABEL org.opencontainers.image.title="NAS Curator" \
-      org.opencontainers.image.description="文件管家：统一整理 NAS 文档与媒体库（飞牛 App）" \
-      org.opencontainers.image.version="0.1.5"
+# 注意：LABEL version 放在 Dockerfile 末尾（0.1.6 移过来）——之前它在 pip 层
+# 之前，版本号一改即 bust 全部后续层缓存，全量构建须重装全部依赖并常在
+# 下载 torch 时 stall；移到末尾后 pip 层缓存不再受版本号影响，下次一键升级
+# 的全量构建可复用缓存。
 
 # 文档抽取依赖（二进制工具，P1 实测口径）：
 #   poppler-utils -> pdftotext（PDF 文本抽取；缺失时走远程 OCR 服务）
@@ -62,4 +63,7 @@ ENV PYTHONUNBUFFERED=1 \
 EXPOSE 8000
 HEALTHCHECK --interval=60s --timeout=10s --start-period=120s --retries=3 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/dashboard', timeout=5)"
+LABEL org.opencontainers.image.title="NAS Curator" \
+      org.opencontainers.image.description="文件管家：统一整理 NAS 文档与媒体库（飞牛 App）" \
+      org.opencontainers.image.version="0.1.6"
 ENTRYPOINT ["/app/entrypoint.sh"]

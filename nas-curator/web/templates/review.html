@@ -2,7 +2,7 @@
 {% block title %}复核队列{% endblock %}
 {% block content %}
 <h1>复核队列</h1>
-<p class="lead">日常打开首先看到的就是这里：<strong id="pending-count">…</strong> 条待点，点完即空。</p>
+<p class="lead">按文件夹分组，一张卡片一次决定整包；点开展开逐条处理。<strong id="pending-count">…</strong> 条待点，点完即空。</p>
 
 <div class="btn-row" style="margin-bottom:12px">
   <label class="check" style="margin:0">类型筛选
@@ -86,7 +86,15 @@
 
   function removeItem(id) {
     var el = listEl.querySelector('[data-id="' + CSS.escape(String(id)) + '"]');
+    var card = el ? el.closest('.folder-card') : null;
     if (el) el.remove();
+    if (card) {
+      // 0.1.6：单条点完后同步刷新所属文件夹卡片的条数，空了整张卡片消失
+      var left = card.querySelectorAll('.review-item').length;
+      var cc = card.querySelector('.folder-count');
+      if (cc) cc.textContent = '共 ' + left + ' 条';
+      if (left === 0) card.remove();
+    }
     var n = listEl.querySelectorAll('.review-item').length;
     countEl.textContent = n;
     if (n === 0) listEl.innerHTML = '<p class="empty">复核队列已空 🎉</p>';
@@ -100,14 +108,72 @@
     C.toast(decision === 'approved' ? '已批准' + (res && res.moved ? '，已移动到 ' + (res.dst || '') : '') : '已拒绝');
   }
 
+  // 0.1.6：文件夹卡片。改分类下拉默认 = 文件夹当前顶层；整包批准/拒绝
+  // 对卡片下全部待复核项生效（有类型筛选时只对筛选出的类型生效）。
+  function folderHtml(g) {
+    var kinds = Object.keys(g.kinds || {}).sort().map(function (k) {
+      return C.kindTag(k) + ' ×' + g.kinds[k];
+    }).join(' ');
+    var where = g.top_label + (g.path ? ' / ' + g.path : '');
+    return '<section class="folder-card" data-folder="' + C.esc(g.folder) + '">' +
+      '<div class="folder-head">' +
+        '<button class="folder-toggle" type="button" aria-label="展开/收起">▸</button>' +
+        '<div class="folder-title"><strong class="folder-display">' + C.esc(g.display) + '</strong>' +
+        '<span class="muted"> ' + C.esc(where) + ' · <span class="folder-count">共 ' + g.count + ' 条</span></span></div>' +
+        '<span class="folder-kinds">' + kinds + '</span>' +
+      '</div>' +
+      '<div class="folder-actions">' +
+        '<label>改分类 <select class="folder-category inline-input">' + categoryOptions(g.top_label) + '</select></label>' +
+        '<button class="btn small btn-folder-approve" type="button">批准整包</button>' +
+        '<button class="btn ghost small btn-folder-reject" type="button">拒绝整包</button>' +
+        '<span class="muted">整包决定对该文件夹下全部待复核项生效。</span>' +
+      '</div>' +
+      '<div class="folder-items" hidden>' + g.items.map(itemHtml).join('') + '</div>' +
+    '</section>';
+  }
+
+  function toggleFolder(card) {
+    var items = card.querySelector('.folder-items');
+    var btn = card.querySelector('.folder-toggle');
+    var open = items.hidden;
+    items.hidden = !open;
+    btn.textContent = open ? '▾' : '▸';
+  }
+
+  async function folderDecide(card, action) {
+    var folder = card.getAttribute('data-folder');
+    var cat = card.querySelector('.folder-category').value;
+    var kind = document.getElementById('kind-filter').value;
+    var n = card.querySelectorAll('.review-item').length;
+    var name = card.querySelector('.folder-display').textContent;
+    var verb = action === 'approve' ? '批准' : '拒绝';
+    if (!window.confirm('确定' + verb + '整包「' + name + '」（共 ' + n + ' 条）吗？' +
+        (action === 'approve'
+          ? '批准后按所选分类整包移动；重复项进重复待确认区，不删除。'
+          : '拒绝只改状态，文件不动。'))) return;
+    var btn = card.querySelector(action === 'approve' ? '.btn-folder-approve' : '.btn-folder-reject');
+    btn.disabled = true;
+    try {
+      var body = { folder: folder, category: cat };
+      if (kind) body.kind = kind;
+      var res = await C.api('/api/review/folders/' + action, { method: 'POST', body: body });
+      C.toast('整包' + verb + '完成（' + (res.total || 0) + ' 条）');
+      await load();
+    } catch (e) {
+      btn.disabled = false;
+      C.toast('整包操作失败：' + e.message, true);
+    }
+  }
+
   async function load() {
     listEl.innerHTML = '<p class="loading">加载中…</p>';
     try {
       var kind = document.getElementById('kind-filter').value;
-      var q = '/api/review?status=pending' + (kind ? '&kind=' + encodeURIComponent(kind) : '');
-      var items = await C.api(q);
-      countEl.textContent = items.length;
-      listEl.innerHTML = items.length ? items.map(itemHtml).join('') : '<p class="empty">复核队列已空 🎉</p>';
+      var q = '/api/review/folders?status=pending' + (kind ? '&kind=' + encodeURIComponent(kind) : '');
+      var groups = await C.api(q);
+      var total = groups.reduce(function (n, g) { return n + (g.count || 0); }, 0);
+      countEl.textContent = total;
+      listEl.innerHTML = groups.length ? groups.map(folderHtml).join('') : '<p class="empty">复核队列已空 🎉</p>';
     } catch (e) {
       C.showError(document.getElementById('review-error'), e);
       listEl.innerHTML = '';
@@ -115,6 +181,17 @@
   }
 
   listEl.addEventListener('click', async function (ev) {
+    var fbtn = ev.target.closest('.btn-folder-approve, .btn-folder-reject');
+    if (fbtn) {
+      var card = ev.target.closest('.folder-card');
+      await folderDecide(card, fbtn.classList.contains('btn-folder-approve') ? 'approve' : 'reject');
+      return;
+    }
+    var tog = ev.target.closest('.folder-toggle');
+    if (tog) {
+      toggleFolder(ev.target.closest('.folder-card'));
+      return;
+    }
     var btn = ev.target.closest('.btn-approve, .btn-reject');
     if (!btn) return;
     var item = ev.target.closest('.review-item');

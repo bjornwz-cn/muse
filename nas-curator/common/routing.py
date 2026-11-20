@@ -108,6 +108,46 @@ def top_label(top):
     return TOP_LABELS.get(top or "", "其他")
 
 
+# 0.1.6：复核队列文件夹分组——通用容器目录名（下载/桌面/文稿等）本身不是
+# 有意义的文件夹，下钻一级取真正的项目/内容文件夹（如 mac-backup 下的
+# 下载/PaddleOCR-3.7.0，而不是把全部下载混在一张「下载」卡片里）。
+GENERIC_FOLDER_CONTAINERS = ("下载", "Download", "桌面", "Desktop",
+                             "文稿", "Documents")
+
+
+def review_folder_for(src, roots):
+    """复核项所属文件夹（供队列按文件夹分组）：返回
+    (folder_key, top, rel_folder, display)。
+
+    folder_key = "<top>:<rel_folder>"；rel_folder 为库根下的相对文件夹，
+    取第一级目录；第一级为通用容器名时下钻一级（至多三级），如
+    mac-backup 的「下载/PaddleOCR-3.7.0」、家庭库的「刘音」、
+    工作库的「归档」。src 不在任何库根下时 top 为 None，folder_key
+    为 "other:"；文件直接在库根下时 rel_folder 为 ""。
+    """
+    top = library_top(src, roots) if src else None
+    if not top or top not in (roots or {}):
+        return ("other:", None, "", "其他")
+    root = roots[top]
+    try:
+        rel = _os.path.relpath(_os.path.dirname(_os.path.abspath(src)),
+                               _os.path.abspath(root))
+    except ValueError:
+        return ("other:", None, "", "其他")
+    if rel in (".", ""):
+        return (f"{top}:", top, "", top_label(top))
+    parts = [p for p in rel.split(_os.sep) if p not in ("", ".")]
+    if not parts:
+        return (f"{top}:", top, "", top_label(top))
+    depth = 1
+    while (depth < len(parts) and parts[depth - 1] in GENERIC_FOLDER_CONTAINERS
+           and depth < 3):
+        depth += 1
+    folder = _os.sep.join(parts[:depth])
+    return (f"{top}:{folder}", top, folder.replace(_os.sep, "/"),
+            parts[depth - 1])
+
+
 def family_person_of(src, family_root="/vol1/1000/家庭文件"):
     """家庭库路径里的人：<family_root>/<成员>/… -> 成员名；不在家庭库返回 ''。
 
