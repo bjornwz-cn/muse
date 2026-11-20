@@ -33,11 +33,15 @@
   var listEl = document.getElementById('review-list');
   var countEl = document.getElementById('pending-count');
 
-  function categoryOptions(selected) {
-    /* 建议分类以下拉改；选项为三库顶级分类口径，后端返回 categories 后可再扩展。 */
-    var opts = ['工作', '家庭', '媒体'];
-    return opts.map(function (o) {
-      return '<option value="' + C.esc(o) + '"' + (o === selected ? ' selected' : '') + '>' + C.esc(o) + '</option>';
+  function categoryOptions(currentTop) {
+    /* 0.1.2：下拉默认 = 文件当前顶层（后端 current_top），不再固定选中第一个「工作」。
+       当前顶层若不是三库之一（如收件箱/笔记本备份），也作为首选项保留；
+       其余为可改到的三库顶层。改顶层后批准会重算目标路径。 */
+    var libs = ['工作', '家庭', '媒体'];
+    var opts = [currentTop || '工作'];
+    libs.forEach(function (l) { if (l !== opts[0]) opts.push(l); });
+    return opts.map(function (o, i) {
+      return '<option value="' + C.esc(o) + '"' + (i === 0 ? ' selected' : '') + '>' + C.esc(o) + '</option>';
     }).join('');
   }
 
@@ -54,10 +58,12 @@
         C.confBar(p.confidence) +
       '</div>' +
       '<p style="margin:8px 0 0">' + C.esc(p.reason || '') + '</p>' +
+      '<p style="margin:4px 0 0">当前所在：<strong>' + C.esc(it.current_top || '—') + '</strong>' +
+      (it.kind === 'dup' ? ' · 批准后移入 06-重复待确认区（不删除，可找回）' : '') + '</p>' +
       (p.evidence ? '<p class="evidence" style="margin:4px 0 0">依据：' + C.esc(p.evidence) + '</p>' : '') +
       (p.suggested_dst ? '<p class="dst" style="margin:4px 0 0">建议目标：' + C.esc(p.suggested_dst) + '</p>' : '') +
       '<div class="review-edit">' +
-        '<div><label>改分类</label><select class="edit-category inline-input">' + categoryOptions(p.category) + '</select></div>' +
+        '<div><label>改分类</label><select class="edit-category inline-input">' + categoryOptions(it.current_top) + '</select></div>' +
         '<div><label>改名（留空则不改名）</label><input type="text" class="edit-name inline-input" placeholder="新文件名"></div>' +
         '<div><label>打标签（逗号分隔）</label><input type="text" class="edit-tags inline-input" placeholder="如：合同,2026" value="' + C.esc((p.tags || []).join(',')) + '"></div>' +
       '</div>' +

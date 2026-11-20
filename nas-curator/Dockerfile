@@ -1,4 +1,4 @@
-# NAS Curator（文件管家）0.1.1 —— 飞牛 App 容器镜像
+# NAS Curator（文件管家）0.1.2 —— 飞牛 App 容器镜像
 # 多架构：amd64 + arm64（buildx 构建；本次 VM 沙箱无法启动容器，
 # 实际产物由手工组装脚本按同一份依赖清单生成，见 scripts/assemble-image.sh）。
 # 底镜像 python:3.12-slim（与 P1/P2 实测的 Python 3.12 一致）。
@@ -10,7 +10,7 @@ FROM python:3.12-slim AS base
 
 LABEL org.opencontainers.image.title="NAS Curator" \
       org.opencontainers.image.description="文件管家：统一整理 NAS 文档与媒体库（飞牛 App）" \
-      org.opencontainers.image.version="0.1.1"
+      org.opencontainers.image.version="0.1.2"
 
 # 文档抽取依赖（二进制工具，P1 实测口径）：
 #   poppler-utils -> pdftotext（PDF 文本抽取；缺失时走远程 OCR 服务）

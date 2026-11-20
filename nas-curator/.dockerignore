@@ -11,3 +11,5 @@ tests/
 docs/
 .git/
 .mypy_cache/
+.env.local
+config/.env.local

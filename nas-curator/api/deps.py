@@ -6,6 +6,7 @@ import os
 import sqlite3
 
 from common import db as DB
+from common.llm_models import mask_key  # 掩码规范出处（前 2 + **** + 后 2）
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SHIPPED_CONFIG_DIR = os.path.join(PROJECT_ROOT, "config")
@@ -161,15 +162,6 @@ def read_env_local() -> dict:
     return out
 
 
-def mask_key(value: str) -> str:
-    """掩码：前 2 + **** + 后 2；长度 ≤4 全掩码；空值返回空串。"""
-    if not value:
-        return ""
-    if len(value) <= 4:
-        return "****"
-    return f"{value[:2]}****{value[-2:]}"
-
-
 def masked_keys() -> dict:
     """已配置的 provider → 掩码值。只读 .env.local 与环境变量，绝不返回明文。"""
     stored = read_env_local()
@@ -179,6 +171,23 @@ def masked_keys() -> dict:
         if value:
             out[provider] = mask_key(value)
     return out
+
+
+def public_models() -> tuple:
+    """模型列表公开视图（每条含 key_set/key_masked，绝不含明文）+ 来源。
+
+    来源 'file' = 用户在设置页保存过的列表；'default' = 代码默认列表
+    （火山 Ark Plan → 火山 Ark 按量 → 本地 Ollama）。
+    """
+    from common import llm_models as LM
+    models, source = LM.load_models()
+    stored = read_env_local()
+    key_values = {}
+    for m in models:
+        env_var = m.get("key_env") or ""
+        if env_var:
+            key_values[env_var] = stored.get(env_var) or os.environ.get(env_var) or ""
+    return LM.public_models(models, key_values), source
 
 
 def key_env_var(provider: str) -> str:

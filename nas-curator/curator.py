@@ -101,37 +101,74 @@ def _resolve_library(args):
     return None, getattr(args, "kind", "document")
 
 
+def _setup_llm(args):
+    """只建 LLM（轻量：读模型列表文件 + 探活）。
+
+    收件箱监听每轮重建一次，模型列表/Key 改动无需重启容器即可生效（0.1.2）。
+    """
+    if not getattr(args, "llm", False):
+        return None
+    from curator_core import LLM
+    llm = LLM(args.llm_host, args.llm_model)
+    if not llm.alive():
+        print("! LLM 不可达，自动降级为规则判定")
+        return None
+    return llm
+
+
+def _setup_sem(args, rules):
+    """建语义分类器 + 预筛（fit 较重，进程内只建一次）。"""
+    if not getattr(args, "sem", False):
+        return None, None
+    from curator_core import Prescreener, SemanticClassifier
+    sem = SemanticClassifier(
+        os.environ.get("SEM_HOST", "http://172.17.0.1:11500"),
+        getattr(args, "sem_model", "bge-m3:latest"),
+        min_sim=getattr(args, "sem_min_sim", 0.42),
+        min_margin=getattr(args, "sem_margin", 0.02),
+        self_names=(rules.get("self_names") or ()) if rules else ())
+    if not sem.alive():
+        print("！语义模型不可用（bge-m3），跳过向量分类")
+        return None, None
+    n = sem.fit(rules)
+    print(f"语义空间就绪：{n} 个类目向量")
+    prescreener = None
+    if rules is not None:
+        try:
+            prescreener = Prescreener(sem=sem)
+        except TypeError:
+            prescreener = Prescreener()
+        prescreener.fit(rules)
+        print("预筛层就绪（bge-m3，sim≥0.75 且 margin≥0.10 直接定类）")
+    return sem, prescreener
+
+
 def _setup_models(args, rules):
     """按 --llm/--sem 装配 LLM / 语义 / 预筛；不可达时降级，不抛错。"""
-    llm = sem = prescreener = None
-    if args.llm or args.sem:
-        from curator_core import LLM, Prescreener, SemanticClassifier
-        if args.llm:
-            llm = LLM(args.llm_host, args.llm_model)
-            if not llm.alive():
-                print("! LLM 不可达，自动降级为规则判定")
-                llm = None
-        if args.sem:
-            sem = SemanticClassifier(
-                os.environ.get("SEM_HOST", "http://172.17.0.1:11500"),
-                getattr(args, "sem_model", "bge-m3:latest"),
-                min_sim=getattr(args, "sem_min_sim", 0.42),
-                min_margin=getattr(args, "sem_margin", 0.02),
-                self_names=(rules.get("self_names") or ()) if rules else ())
-            if not sem.alive():
-                print("！语义模型不可用（bge-m3），跳过向量分类")
-                sem = None
-            else:
-                n = sem.fit(rules)
-                print(f"语义空间就绪：{n} 个类目向量")
-        if sem is not None and rules is not None:
-            try:
-                prescreener = Prescreener(sem=sem)
-            except TypeError:
-                prescreener = Prescreener()
-            prescreener.fit(rules)
-            print("预筛层就绪（bge-m3，sim≥0.75 且 margin≥0.10 直接定类）")
+    if not (getattr(args, "llm", False) or getattr(args, "sem", False)):
+        return None, None, None
+    llm = _setup_llm(args)
+    sem, prescreener = _setup_sem(args, rules)
     return llm, sem, prescreener
+
+
+def _apply_path_guard(items, cfg):
+    """0.1.2 路径强信号：低置信（< auto 阈值）建议不得跨顶层移动。
+
+    在 _dispatch_plan 的三个返回点统一跑（文档/媒体/混合输入源全覆盖）。
+    只改建议，不动文件；被拦下的项数打印一行。
+    """
+    from common import routing as RT
+    roots = RT.roots_from_config(cfg)
+    threshold = ((cfg or {}).get("thresholds") or {}).get("auto", 0.85)
+    try:
+        threshold = float(threshold)
+    except (TypeError, ValueError):
+        threshold = 0.85
+    items, info = RT.apply_path_prior_guard(items, roots, threshold)
+    if info.get("guarded"):
+        print(f"  路径先验：{info['guarded']} 项低置信跨顶层建议已转复核")
+    return items
 
 
 def _dispatch_plan(root, kind, rules, llm, sem, prescreener, args, cfg):
@@ -148,8 +185,9 @@ def _dispatch_plan(root, kind, rules, llm, sem, prescreener, args, cfg):
         classifier, mcfg = _build_media_classifier(args)
         mcfg.setdefault("library_root", root)
         paths = _collect_media_paths(root)
-        return ME.plan_media_files(paths, mcfg, classifier=classifier,
-                                   library_root=root)
+        items, stats = ME.plan_media_files(paths, mcfg, classifier=classifier,
+                                           library_root=root)
+        return _apply_path_guard(items, cfg), stats
     from curator_core import engine as CE
     if rules is None:
         raise SystemExit("文档 plan 需要 --rules（规则文件）")
@@ -181,16 +219,23 @@ def _dispatch_plan(root, kind, rules, llm, sem, prescreener, args, cfg):
         stats["media"] = mstats
         if dropped:
             stats["media_doc_dropped"] = dropped
-        return kept + mitems, stats
-    return items, stats
+        return _apply_path_guard(kept + mitems, cfg), stats
+    return _apply_path_guard(items, cfg), stats
 
 
 def _route_family_items(items, cfg):
     """P2(P1.1)：mixed 输入源的文档项做家庭分流。
 
     命中家庭（人名/家庭关键词）的 move/rename 项，把 dst 从工作库改写到
-    家庭库/<人名>/<类目>/<文件名>；review 项 dst 为空，不改；unit 整目录项
-    按目录名同样路由。返回改写后的 items（原地改 dst，并打 library/tags 标记）。
+    家庭库；review 项 dst 为空，不改；unit 整目录项按目录名同样路由。
+    返回改写后的 items（原地改 dst，并打 library/tags 标记）。
+
+    0.1.2（人优先 + 路径强信号）：
+    - 分流判断除文件名/正文/标签外，把源文件路径也放进 haystack
+      （如 下载/Wangzhen-Mac/刘音/会议/x.jpg 里的「刘音」就是强信号）；
+    - 家庭成员的工作内容（工作库类目 01-14）进
+      家庭/<成员>/工作/<内容子目录>/（会议/票据等）；家庭个人内容
+      （15-19 类目）仍走 家庭/<成员>/<类目>/，不加「工作」层。
     """
     import os
     from common import routing as RT
@@ -206,7 +251,7 @@ def _route_family_items(items, cfg):
         name = os.path.basename(it.get("src") or "")
         lib, person = RT.route_document(
             name=name,
-            text=it.get("evidence") or "",
+            text=((it.get("src") or "") + " " + (it.get("evidence") or "")),
             tags=it.get("tags") or [])
         if lib != "family":
             it["library"] = "work"
@@ -219,9 +264,13 @@ def _route_family_items(items, cfg):
         it["tags"] = tags
         dst = it.get("dst") or ""
         if dst:
-            it["dst"] = RT.rewrite_family_dst(
-                dst, family_root, person,
-                target_name=it.get("new_name") or name)
+            target = it.get("new_name") or name
+            if RT.is_work_category(it.get("category") or ""):
+                it["dst"] = RT.rewrite_family_work_dst(
+                    family_root, person, target, it.get("category") or "")
+            else:
+                it["dst"] = RT.rewrite_family_dst(
+                    dst, family_root, person, target_name=target)
         n_family += 1
     if n_family:
         print(f"  家庭分流：{n_family} 项归家庭库")
@@ -732,7 +781,9 @@ def cmd_inbox(args):
     conn = DB.connect(args.db)
     DB.init_db(args.db)
     rules = _load_plan_rules(args)
-    llm, sem, prescreener = _setup_models(args, rules)
+    # 语义/预筛建一次（fit 较重）；LLM 每轮重建，模型列表/Key 改动无需重启
+    # 容器即可生效（0.1.2）。
+    sem, prescreener = _setup_sem(args, rules)
 
     def once():
         if not os.path.isdir(inbox_path):
@@ -742,6 +793,7 @@ def cmd_inbox(args):
         a2 = argparse.Namespace(**vars(args))
         a2.root = inbox_path
         # 收件箱按定义就是混合输入源（文档→工作库、媒体→媒体库），不按路径解析
+        llm = _setup_llm(args)
         items, stats = _dispatch_plan(inbox_path, "mixed", rules, llm, sem,
                                       prescreener, a2, cfg)
         kept = []
@@ -822,6 +874,8 @@ def cmd_process(args):
             print(f"! 跳过排除路径：{it.get('src')}")
             continue
         kept.append(it)
+    # 0.1.2：单文件路径（_plan_single_file）不走 _dispatch_plan，在此补一道路径先验。
+    kept = _apply_path_guard(kept, cfg)
     rules_version = rules.get("version") if isinstance(rules, dict) else None
     plan_id = _store_plan(conn, "process", rules_version, kept)
     DB.set_plan_status(conn, plan_id, "pending_review")

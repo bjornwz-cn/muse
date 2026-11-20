@@ -10,11 +10,18 @@
   ark-plan（火山 Agent Plan，首选）-> ark-payg（按量付费）-> local（本地 ollama）
 任何一环不可用/超时/额度尽/被封，自动切下一个，主流程不阻塞。
 
+0.1.2：provider 链改为用户可配的模型列表（common.llm_models，
+config/llm_models.json，设置页写；顺序即优先级）。类型新增 custom
+（自定义 OpenAI 兼容 endpoint，走 chat/completions，不带 thinking 字段）。
+
 约束：
   - 全链失败 -> 返回 None，调用方沿用规则结论；
   - key 不硬编码在逻辑里：只从环境变量（ARK_PLAN_KEY / ARK_PAYG_KEY）
     或 CURATOR_LLM_CONFIG 指定的配置文件读；本包内不设 llm.json，
     也不再从模块同级目录读任何密钥文件；
+  - 0.1.2 补充：Key 也可从 CURATOR_CONFIG_DIR 下的 .env.local 读
+    （设置页的写入位置；收件箱监听进程没有 os.environ 注入，靠此文件取 Key）。
+    模型列表文件里绝不含 Key 明文，只记 key_env 变量名。
   - 只读：不产生任何文件改动。
 """
 from __future__ import annotations
@@ -49,18 +56,52 @@ COOLDOWN = {
 _ARK_ENV = {"ark-plan": "ARK_PLAN_KEY", "ark-payg": "ARK_PAYG_KEY"}
 
 
-def _load_config():
-    """返回 provider 列表，按优先级排列。缺失配置时退化为仅本地。
+def _read_env_file():
+    """读 .env.local（CURATOR_CONFIG_DIR 或项目 config/ 下）供 Key 解析。
+
+    设置页写 Key 后，收件箱监听进程（无 os.environ 注入）靠此文件取 Key；
+    CURATOR_CONFIG_DIR 指定时只读该目录下的 .env.local（容器内 /data/config）；
+    未指定时读项目 config/ 下的 .env.local（开发态）。
+    """
+    cfg_dir = os.environ.get("CURATOR_CONFIG_DIR")
+    bases = [cfg_dir] if cfg_dir else [os.path.join(HERE, "..", "config")]
+    for base in bases:
+        if not base:
+            continue
+        p = os.path.join(base, ".env.local")
+        if not os.path.exists(p):
+            continue
+        out = {}
+        try:
+            with open(p, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    out[k.strip()] = v.strip().strip('"').strip("'")
+        except OSError:
+            continue
+        return out
+    return {}
+
+
+def _resolve_key(key_env):
+    """Key 解析：环境变量优先，其次 .env.local；都没有返回 ''（该 provider 跳过）。"""
+    if not key_env:
+        return ""
+    v = os.environ.get(key_env, "")
+    if v:
+        return v
+    return _read_env_file().get(key_env, "")
+
+
+def _providers_from_legacy(cfg):
+    """legacy 来源：CURATOR_LLM_CONFIG 文件，或未指定时的环境变量默认。
 
     key 只从两个来源读：环境变量（ARK_PLAN_KEY / ARK_PAYG_KEY，
     配置文件里可用 api_key_env 另行指定变量名）或 CURATOR_LLM_CONFIG
     指定的配置文件内的 api_key；不读模块同级 llm.json。"""
-    cfg = {}
-    if CONFIG_PATH and os.path.exists(CONFIG_PATH):
-        try:
-            cfg = json.load(open(CONFIG_PATH, encoding="utf-8"))
-        except Exception:
-            cfg = {}
     order = cfg.get("order") or ["ark-plan", "ark-payg", "local"]
     spec = cfg.get("providers") or {}
     out = []
@@ -74,7 +115,7 @@ def _load_config():
                         "timeout": p.get("timeout") or 25})
             continue
         env_name = p.get("api_key_env") or _ARK_ENV.get(name, "")
-        key = os.environ.get(env_name, "") if env_name else ""
+        key = _resolve_key(env_name) if env_name else ""
         key = key or p.get("api_key") or ""
         if not key:
             continue
@@ -88,6 +129,73 @@ def _load_config():
         out.append({"name": "local", "kind": "ollama", "base_url": DEFAULT_HOST,
                     "model": DEFAULT_MODEL, "embed_model": DEFAULT_EMBED, "timeout": 25})
     return out
+
+
+def _providers_from_models(models):
+    """0.1.2 模型列表文件来源：按文件顺序原样执行（不强制补本地兜底）。
+
+    type 映射：ark-plan/ark-payg -> kind "ark"；ollama -> "ollama"；
+    custom -> kind "openai"（OpenAI 兼容 chat/completions，不带 thinking 字段）。
+    未启用、或需 Key 但 Key 为空的条目跳过。
+    """
+    out = []
+    for m in models or []:
+        if not m.get("enabled", True):
+            continue
+        t = m.get("type")
+        mid = m.get("id") or t
+        if t in ("ark-plan", "ark-payg"):
+            key = _resolve_key(m.get("key_env") or _ARK_ENV.get(t, ""))
+            if not key:
+                continue
+            out.append({"name": mid, "kind": "ark",
+                        "base_url": (m.get("base_url") or
+                                     (ARK_BASE_PLAN if t == "ark-plan"
+                                      else ARK_BASE_PAYG)).rstrip("/"),
+                        "api_key": key,
+                        "model": m.get("model") or "deepseek-v4-1-flash-261017",
+                        "timeout": m.get("timeout") or 30})
+        elif t == "ollama":
+            out.append({"name": mid, "kind": "ollama",
+                        "base_url": (m.get("base_url") or DEFAULT_HOST).rstrip("/"),
+                        "model": m.get("model") or DEFAULT_MODEL,
+                        "embed_model": m.get("embed_model") or DEFAULT_EMBED,
+                        "timeout": m.get("timeout") or 25})
+        elif t == "custom":
+            key = _resolve_key(m.get("key_env") or "")
+            if not key or not (m.get("base_url") or "").strip():
+                continue
+            out.append({"name": mid, "kind": "openai",
+                        "base_url": m["base_url"].rstrip("/"),
+                        "api_key": key,
+                        "model": m.get("model") or "",
+                        "timeout": m.get("timeout") or 30})
+    return out
+
+
+def _load_config():
+    """返回 provider 列表，按优先级排列。
+
+    来源（按优先）：1) CURATOR_LLM_CONFIG 指定的 legacy 配置文件；
+    2) 模型列表文件（0.1.2 设置页写，见 common.llm_models）；
+    3) 环境变量默认（ark-plan -> ark-payg -> local）。
+    缺失配置时退化为仅本地。
+    """
+    if CONFIG_PATH and os.path.exists(CONFIG_PATH):
+        cfg = {}
+        try:
+            cfg = json.load(open(CONFIG_PATH, encoding="utf-8"))
+        except Exception:
+            cfg = {}
+        return _providers_from_legacy(cfg)
+    try:
+        from common.llm_models import load_models
+        models, source = load_models()
+    except Exception:  # noqa: BLE001
+        models, source = [], "default"
+    if source == "file":
+        return _providers_from_models(models)
+    return _providers_from_legacy({})
 
 
 class LLM:
@@ -127,12 +235,12 @@ class LLM:
         s.setdefault("err", reason)
 
     def alive(self):
-        """任一 provider 可用（本地探活或 ark 配置存在）即视为可用。"""
+        """任一 provider 可用（本地探活或 ark/openai 配置存在）即视为可用。"""
         if self._alive is not None:
             return self._alive
         ok = False
         for p in self._available():
-            if p["kind"] == "ark" and p.get("api_key"):
+            if p["kind"] in ("ark", "openai") and p.get("api_key"):
                 ok = True
                 break
             if p["kind"] == "ollama" and self._ollama_alive(p):
@@ -149,7 +257,8 @@ class LLM:
             return False
 
     # ---------- 单 provider 调用 ----------
-    def _call_ark(self, p, messages, json_mode, timeout, max_tokens):
+    def _call_ark(self, p, messages, json_mode, timeout, max_tokens,
+                  use_thinking=True):
         import requests
         body = {
             "model": p["model"],
@@ -159,6 +268,9 @@ class LLM:
             # deepseek/glm/kimi 系：必须显式关思考，否则 content 为空
             "thinking": {"type": "disabled"},
         }
+        if not use_thinking:
+            # 自定义 OpenAI 兼容端点：不带 thinking 字段（未知字段可能被拒）
+            body.pop("thinking", None)
         if json_mode:
             body["response_format"] = {"type": "json_object"}
         url = p["base_url"] + "/chat/completions"
@@ -230,6 +342,10 @@ class LLM:
             try:
                 if p["kind"] == "ark":
                     content, err = self._call_ark(p, messages, jm, timeout, num_predict)
+                elif p["kind"] == "openai":
+                    # 自定义 OpenAI 兼容：同 chat/completions，不带 thinking 字段
+                    content, err = self._call_ark(p, messages, jm, timeout,
+                                                  num_predict, use_thinking=False)
                 else:
                     content, err = self._call_ollama(p, messages, jm, timeout, num_predict)
             except Exception as e:
@@ -510,7 +626,8 @@ class LLM:
                                 "confidence": conf, "low_text": part[idx][1][2]}
             return got
 
-        use_parallel = parallel > 1 and any(p["kind"] == "ark" for p in self._available())
+        use_parallel = parallel > 1 and any(
+            p["kind"] in ("ark", "openai") for p in self._available())
         if use_parallel:
             from concurrent.futures import ThreadPoolExecutor
             with ThreadPoolExecutor(max_workers=min(parallel, len(parts))) as ex:
