@@ -131,7 +131,6 @@
       var d = await C.api('/api/dashboard');
       document.getElementById('app-version').textContent = d.version ? ('当前版本 ' + d.version) : '';
       var cards = (d.libraries || []).map(function (lib) {
-      var cards = (d.libraries || []).map(function (lib) {
         return '<div class="card"><h3>' + C.esc(lib.name) + '</h3>' +
           '<div class="stat-row"><div class="stat"><b>' + C.fmtNum(lib.files) + '</b><span class="meta">文件</span></div>' +
           '<div class="stat"><b>' + C.fmtBytes(lib.bytes) + '</b><span class="meta">体积</span></div>' +

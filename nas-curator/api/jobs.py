@@ -73,6 +73,8 @@ def _plan_namespace(body: CreateJobBody, root: str, db_path: str) -> argparse.Na
     # 0.1.5：向量模型名改走设置页配置（common.embedding），不再写死 bge-m3
     from common.embedding import load_embedding_config
     sem_model = load_embedding_config().get("model") or "bge-m3:latest"
+    # 0.1.7：API 后台线程已自建 job 行，cmd_plan 不得再建一行（_record_job=False），
+    # 否则一行任务在任务页出现两次；job 的收尾仍由 _run_plan_job 负责。
     return argparse.Namespace(
         db=db_path, root=root, library=body.library or "", kind="document",
         out="", rules="", media_config="",
@@ -84,6 +86,7 @@ def _plan_namespace(body: CreateJobBody, root: str, db_path: str) -> argparse.Na
         llm_model="qwen3:4b", llm_min_conf=0.55, llm_max=2000,
         sem=bool(body.use_sem), sem_model=sem_model,
         sem_min_sim=0.42, sem_margin=0.02,
+        _record_job=False,
     )
 
 
@@ -200,7 +203,8 @@ def _run_cmd_apply(job_id: int, db_path: str, plan_id: int):
     try:
         DB.set_plan_status(conn, plan_id, "applying")
         ns = argparse.Namespace(db=db_path, plan_id=plan_id, plan="", root="",
-                                map="", report="", uid=1000, gid=1000, dry_run=False)
+                                map="", report="", uid=1000, gid=1000, dry_run=False,
+                                _record_job=False)  # 0.1.7：本行已由 API 建 job，cmd_apply 不再建
         try:
             CUR.cmd_apply(ns)
         except SystemExit as e:
@@ -219,7 +223,8 @@ def _run_cmd_apply(job_id: int, db_path: str, plan_id: int):
 def _run_rollback(job_id: int, db_path: str, plan_id: int):
     conn = DB.connect(db_path)
     try:
-        ns = argparse.Namespace(db=db_path, plan_id=plan_id, map="", dry_run=False)
+        ns = argparse.Namespace(db=db_path, plan_id=plan_id, map="", dry_run=False,
+                                _record_job=False)  # 0.1.7：本行已由 API 建 job，cmd_rollback 不再建
         try:
             CUR.cmd_rollback(ns)
         except SystemExit as e:

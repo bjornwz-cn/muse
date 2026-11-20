@@ -327,41 +327,104 @@ def _load_plan_rules(args):
     return None
 
 
+# ---------------------------------------------------------------- CLI job 记录（0.1.7）
+# 问题：只有 POST /api/jobs（Web 发起）才写 jobs 行；CLI 的 plan/apply/
+# rollback 与收件箱监听从不写，导致任务页与总览「最近任务」看不到这些任务。
+# 口径：CLI 入口开始即建 running 行，结束按结果 finish 为 done/failed；
+# API 后台线程已自建 job 行，须以 args._record_job=False 跳过本层记录，
+# 否则一行任务出现两条记录。收件箱监听见 cmd_inbox 的 once()：
+# 30 分钟一次的自动空扫（0 项）不留行，有动作或失败才留行。
+
+def _record_job(args) -> bool:
+    """本层是否记 job 行：CLI 默认记；API 后台调用时 _record_job=False。"""
+    return bool(getattr(args, "_record_job", True))
+
+
+class _CliJob:
+    """一次 CLI 任务的 jobs 行：建行即 running，done()/fail() 收尾。
+
+    job 行写失败绝不阻塞主流程（建行/收尾失败时静默跳过，主流程照常跑）。
+    """
+
+    def __init__(self, conn, kind, base_summary):
+        self.conn = conn
+        self.kind = kind
+        self.summary = dict(base_summary or {})
+        try:
+            self.job_id = DB.create_job(conn, kind)
+        except Exception:  # noqa: BLE001 - job 行写失败不阻塞主流程
+            self.job_id = None
+
+    def done(self, extra=None):
+        if self.job_id is None:
+            return
+        summary = dict(self.summary)
+        if extra:
+            summary.update(extra)
+        try:
+            DB.finish_job(self.conn, self.job_id, "done", summary)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def fail(self, err):
+        if self.job_id is None:
+            return
+        summary = dict(self.summary)
+        summary["error"] = str(err) if str(err) else type(err).__name__
+        try:
+            DB.finish_job(self.conn, self.job_id, "failed", summary)
+        except Exception:  # noqa: BLE001
+            pass
+
+
 # ---------------------------------------------------------------- plan
 
 def cmd_plan(args):
-    guard.assert_allowed(args.root, "整理根目录")
     conn = DB.connect(args.db)
     DB.init_db(args.db)
-    cfg = _load_libraries()
-    lib, kind = _resolve_library(args)
-    library_id = lib["id"] if lib else "custom"
-    rules = _load_plan_rules(args)
-    llm, sem, prescreener = _setup_models(args, rules)
-    items, stats = _dispatch_plan(args.root, kind, rules, llm, sem, prescreener,
-                                  args, cfg)
-    # 排除过滤：逐条 src 再过一次 guard（纵深防御）
-    kept = []
-    for it in items:
-        bad, _ = guard.is_excluded(it.get("src") or "")
-        if bad:
-            print(f"! 跳过排除路径：{it.get('src')}")
-            continue
-        kept.append(it)
-    items = kept
-    rules_version = rules.get("version") if isinstance(rules, dict) else None
-    plan_id = _store_plan(conn, library_id, rules_version, items)
-    DB.set_plan_status(conn, plan_id, "pending_review")
-    csv_path = args.out or os.path.join(_HERE, "data", f"plan_{plan_id}.csv")
-    _write_plan_csv(items, csv_path)
-    n_review = sum(1 for i in items if i.get("action") == "review")
-    n_move = sum(1 for i in items if i.get("action") in ("move", "rename"))
-    print(f"计划 #{plan_id}（库：{library_id}）：{len(items)} 项，"
-          f"可执行 {n_move}，进复核 {n_review}，跳过 {len(items) - n_move - n_review}")
-    print(f"  CSV：{csv_path}")
-    if stats.get("llm_calls") is not None:
-        print(f"  LLM 调用：{stats['llm_calls']} 次"
-              + (f"（预筛命中 {stats.get('prescreen_hits', 0)} 次）" if "prescreen_hits" in stats else ""))
+    job = _CliJob(conn, "plan", {"source": "cli", "root": args.root}) \
+        if _record_job(args) else None
+    try:
+        guard.assert_allowed(args.root, "整理根目录")
+        cfg = _load_libraries()
+        lib, kind = _resolve_library(args)
+        library_id = lib["id"] if lib else "custom"
+        rules = _load_plan_rules(args)
+        llm, sem, prescreener = _setup_models(args, rules)
+        items, stats = _dispatch_plan(args.root, kind, rules, llm, sem, prescreener,
+                                      args, cfg)
+        # 排除过滤：逐条 src 再过一次 guard（纵深防御）
+        kept = []
+        for it in items:
+            bad, _ = guard.is_excluded(it.get("src") or "")
+            if bad:
+                print(f"! 跳过排除路径：{it.get('src')}")
+                continue
+            kept.append(it)
+        items = kept
+        rules_version = rules.get("version") if isinstance(rules, dict) else None
+        plan_id = _store_plan(conn, library_id, rules_version, items)
+        DB.set_plan_status(conn, plan_id, "pending_review")
+        csv_path = args.out or os.path.join(_HERE, "data", f"plan_{plan_id}.csv")
+        _write_plan_csv(items, csv_path)
+        n_review = sum(1 for i in items if i.get("action") == "review")
+        n_move = sum(1 for i in items if i.get("action") in ("move", "rename"))
+        print(f"计划 #{plan_id}（库：{library_id}）：{len(items)} 项，"
+              f"可执行 {n_move}，进复核 {n_review}，跳过 {len(items) - n_move - n_review}")
+        print(f"  CSV：{csv_path}")
+        if stats.get("llm_calls") is not None:
+            print(f"  LLM 调用：{stats['llm_calls']} 次"
+                  + (f"（预筛命中 {stats.get('prescreen_hits', 0)} 次）" if "prescreen_hits" in stats else ""))
+    except SystemExit as e:
+        if job is not None:
+            job.fail(e)
+        raise
+    except Exception as e:  # noqa: BLE001 - 失败记 job 行后原样抛出
+        if job is not None:
+            job.fail(e)
+        raise
+    if job is not None:
+        job.done({"plan_id": plan_id, "move": n_move, "review": n_review})
     return 0
 
 
@@ -455,50 +518,67 @@ def _collect_media_paths(root):
 def cmd_apply(args):
     conn = DB.connect(args.db)
     DB.init_db(args.db)
-    if args.plan_id:
-        plan = DB.get_plan(conn, args.plan_id)
-        if not plan:
-            raise SystemExit(f"计划 #{args.plan_id} 不存在")
-        items = DB.list_plan_items(conn, args.plan_id)
-        root = args.root or _common_root([i["src_path"] for i in items])
-        # DB 行转统一 plan-item dict
-        items = [{**i, "src": i["src_path"], "dst": i["dst_path"],
-                  "tags": json.loads(i["tags"]) if i.get("tags") else []}
-                 for i in items]
-        items = [i for i in items if i.get("action") in ("move", "rename")]
-    else:
-        items = []
-        with open(args.plan, encoding="utf-8-sig") as f:
-            for r in csv.DictReader(f):
-                r.setdefault("dst", "")
-                r.setdefault("tags", [])
-                items.append(r)
-        root = args.root or _common_root([r.get("src", "") for r in items if r.get("src")])
-        plan = None
-    guard.assert_allowed(root, "执行根目录")
-    items = [i for i in items if not guard.is_excluded(i.get("src") or "")[0]]
-    # 移动 mechanics 文档/媒体相同，统一走文档引擎的 apply_plan（shutil.move + 同名 __n + chown）。
-    from curator_core import engine as CE
-    operations, report = CE.apply_plan(items, root, dry_run=args.dry_run,
-                                       uid=args.uid, gid=args.gid)
-    if not args.dry_run:
-        plan_id = plan["id"] if plan else None
-        if plan_id is None:
-            plan_id = DB.create_plan(conn, "custom", None, {"csv": args.plan})
-        for op in operations:
-            DB.add_operation(conn, plan_id, op["src_path"], op["dst_path"],
-                             op.get("sha256"))
-        if args.map:
-            _write_map_tsv(operations, args.map)
-            from common import rollback as RB
-            rb = os.path.splitext(args.map)[0] + "_rollback.sh"
-            RB.build_rollback_script(operations, rb)
-            print(f"  映射表：{args.map}\n  回滚脚本：{rb}")
-        DB.set_plan_status(conn, plan_id, "done", report)
-        if args.report:
-            _write_apply_report(args.report, root, report, args.map)
-    print(f"{'[预演] ' if args.dry_run else ''}移动 {report.get('moved', 0)} 项，"
-          f"跳过/失败 {len(report.get('failed', []))} 项")
+    job = _CliJob(conn, "apply", {"source": "cli", "root": args.root or ""}) \
+        if _record_job(args) else None
+    try:
+        if args.plan_id:
+            plan = DB.get_plan(conn, args.plan_id)
+            if not plan:
+                raise SystemExit(f"计划 #{args.plan_id} 不存在")
+            items = DB.list_plan_items(conn, args.plan_id)
+            root = args.root or _common_root([i["src_path"] for i in items])
+            # DB 行转统一 plan-item dict
+            items = [{**i, "src": i["src_path"], "dst": i["dst_path"],
+                      "tags": json.loads(i["tags"]) if i.get("tags") else []}
+                     for i in items]
+            items = [i for i in items if i.get("action") in ("move", "rename")]
+        else:
+            items = []
+            with open(args.plan, encoding="utf-8-sig") as f:
+                for r in csv.DictReader(f):
+                    r.setdefault("dst", "")
+                    r.setdefault("tags", [])
+                    items.append(r)
+            root = args.root or _common_root([r.get("src", "") for r in items if r.get("src")])
+            plan = None
+        job_plan_id = plan["id"] if plan else None
+        guard.assert_allowed(root, "执行根目录")
+        items = [i for i in items if not guard.is_excluded(i.get("src") or "")[0]]
+        # 移动 mechanics 文档/媒体相同，统一走文档引擎的 apply_plan（shutil.move + 同名 __n + chown）。
+        from curator_core import engine as CE
+        operations, report = CE.apply_plan(items, root, dry_run=args.dry_run,
+                                           uid=args.uid, gid=args.gid)
+        if not args.dry_run:
+            plan_id = job_plan_id
+            if plan_id is None:
+                plan_id = DB.create_plan(conn, "custom", None, {"csv": args.plan})
+            job_plan_id = plan_id
+            for op in operations:
+                DB.add_operation(conn, plan_id, op["src_path"], op["dst_path"],
+                                 op.get("sha256"))
+            if args.map:
+                _write_map_tsv(operations, args.map)
+                from common import rollback as RB
+                rb = os.path.splitext(args.map)[0] + "_rollback.sh"
+                RB.build_rollback_script(operations, rb)
+                print(f"  映射表：{args.map}\n  回滚脚本：{rb}")
+            DB.set_plan_status(conn, plan_id, "done", report)
+            if args.report:
+                _write_apply_report(args.report, root, report, args.map)
+        print(f"{'[预演] ' if args.dry_run else ''}移动 {report.get('moved', 0)} 项，"
+              f"跳过/失败 {len(report.get('failed', []))} 项")
+    except SystemExit as e:
+        if job is not None:
+            job.fail(e)
+        raise
+    except Exception as e:  # noqa: BLE001 - 失败记 job 行后原样抛出
+        if job is not None:
+            job.fail(e)
+        raise
+    if job is not None:
+        job.done({"plan_id": job_plan_id, "moved": report.get("moved", 0),
+                  "failed": len(report.get("failed", [])),
+                  "root": root, "dry_run": bool(args.dry_run)})
     return 0
 
 
@@ -550,17 +630,33 @@ def _write_apply_report(report_path, root, report, map_path):
 
 def cmd_rollback(args):
     from common import rollback as RB
-    if getattr(args, "plan_id", None):
-        conn = DB.connect(args.db)
-        DB.init_db(args.db)
-        res = RB.rollback_from_operations(conn, args.plan_id, dry_run=args.dry_run)
-        DB.set_plan_status(conn, args.plan_id, "rolled_back")
-        print(f"{'[预演] ' if args.dry_run else ''}回滚 {res['moved']} 项，"
-              f"缺失 {len(res['missing'])} 项，失败 {len(res['failed'])} 项")
-    else:
-        res = RB.rollback_from_map(args.map, dry_run=args.dry_run)
-        print(f"{'[预演] ' if args.dry_run else ''}回滚 {res['moved']} 项，"
-              f"缺失 {len(res['missing'])} 项，失败 {len(res['failed'])} 项")
+    conn = DB.connect(args.db)
+    DB.init_db(args.db)
+    job = _CliJob(conn, "rollback",
+                  {"source": "cli", "plan_id": getattr(args, "plan_id", None),
+                   "map": getattr(args, "map", "")}) if _record_job(args) else None
+    try:
+        if getattr(args, "plan_id", None):
+            res = RB.rollback_from_operations(conn, args.plan_id, dry_run=args.dry_run)
+            DB.set_plan_status(conn, args.plan_id, "rolled_back")
+            print(f"{'[预演] ' if args.dry_run else ''}回滚 {res['moved']} 项，"
+                  f"缺失 {len(res['missing'])} 项，失败 {len(res['failed'])} 项")
+        else:
+            res = RB.rollback_from_map(args.map, dry_run=args.dry_run)
+            print(f"{'[预演] ' if args.dry_run else ''}回滚 {res['moved']} 项，"
+                  f"缺失 {len(res['missing'])} 项，失败 {len(res['failed'])} 项")
+    except SystemExit as e:
+        if job is not None:
+            job.fail(e)
+        raise
+    except Exception as e:  # noqa: BLE001 - 失败记 job 行后原样抛出
+        if job is not None:
+            job.fail(e)
+        raise
+    if job is not None:
+        job.done({"plan_id": getattr(args, "plan_id", None),
+                  "moved": res["moved"], "missing": len(res["missing"]),
+                  "failed": len(res["failed"]), "dry_run": bool(args.dry_run)})
     return 0
 
 
@@ -778,6 +874,21 @@ def _print_plan_summary(plan_id, library_id, items, csv_path, stats):
               + (f"（预筛命中 {stats.get('prescreen_hits', 0)} 次）" if "prescreen_hits" in stats else ""))
 
 
+def _record_inbox_failure(conn, inbox_path, args, err):
+    """收件箱扫描失败：任何模式都留一条 failed 行（自动扫描失败不能静默）。
+
+    失败发生在建 plan 之前时没有 plan_id；summary 里只带 root 与 error。
+    记录本身失败时静默跳过，不掩盖原始异常。
+    """
+    try:
+        job = _CliJob(conn, "plan",
+                      {"source": "inbox-watch" if getattr(args, "watch", False) else "cli",
+                       "root": inbox_path, "library": "inbox"})
+        job.fail(err)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def cmd_inbox(args):
     """统一收件箱：扫一次（默认）或 --watch 循环扫。只处理稳定文件（settle）。"""
     cfg = _load_libraries()
@@ -793,34 +904,55 @@ def cmd_inbox(args):
     sem, prescreener = _setup_sem(args, rules)
 
     def once():
+        # 0.1.7：收件箱扫描也要留任务记录（否则任务页永远看不到自动扫描）。
+        # 但 30 分钟一次的自动空扫（0 项）不得刷屏：watch 模式下 0 项不留行；
+        # 手动单次扫描无论 0 项与否都留行；有动作或失败时任何模式都留行。
         if not os.path.isdir(inbox_path):
             print(f"收件箱尚不存在：{inbox_path}（P3 部署时创建；本次无文件可处理）")
             return None
-        guard.assert_allowed(inbox_path, "收件箱")
-        a2 = argparse.Namespace(**vars(args))
-        a2.root = inbox_path
-        # 收件箱按定义就是混合输入源（文档→工作库、媒体→媒体库），不按路径解析
-        llm = _setup_llm(args)
-        items, stats = _dispatch_plan(inbox_path, "mixed", rules, llm, sem,
-                                      prescreener, a2, cfg)
-        kept = []
-        for it in items:
-            bad, _ = guard.is_excluded(it.get("src") or "")
-            if bad:
-                print(f"! 跳过排除路径：{it.get('src')}")
-                continue
-            kept.append(it)
-        kept, n_unstable = _settle_filter(kept, settle)
-        if n_unstable:
-            print(f"  未稳定（{settle} 分钟内有改动）跳过 {n_unstable} 项，下轮再扫")
-        rules_version = rules.get("version") if isinstance(rules, dict) else None
-        plan_id = _store_plan(conn, "inbox", rules_version, kept)
-        DB.set_plan_status(conn, plan_id, "pending_review")
-        csv_path = args.out or os.path.join(_HERE, "data", f"plan_{plan_id}.csv")
-        _write_plan_csv(kept, csv_path)
-        _print_plan_summary(plan_id, "inbox", kept, csv_path, stats)
-        if args.apply:
-            _apply_items(kept, inbox_path, args, conn, plan_id)
+        try:
+            guard.assert_allowed(inbox_path, "收件箱")
+            a2 = argparse.Namespace(**vars(args))
+            a2.root = inbox_path
+            # 收件箱按定义就是混合输入源（文档→工作库、媒体→媒体库），不按路径解析
+            llm = _setup_llm(args)
+            items, stats = _dispatch_plan(inbox_path, "mixed", rules, llm, sem,
+                                          prescreener, a2, cfg)
+            kept = []
+            for it in items:
+                bad, _ = guard.is_excluded(it.get("src") or "")
+                if bad:
+                    print(f"! 跳过排除路径：{it.get('src')}")
+                    continue
+                kept.append(it)
+            kept, n_unstable = _settle_filter(kept, settle)
+            if n_unstable:
+                print(f"  未稳定（{settle} 分钟内有改动）跳过 {n_unstable} 项，下轮再扫")
+            rules_version = rules.get("version") if isinstance(rules, dict) else None
+            plan_id = _store_plan(conn, "inbox", rules_version, kept)
+            DB.set_plan_status(conn, plan_id, "pending_review")
+            csv_path = args.out or os.path.join(_HERE, "data", f"plan_{plan_id}.csv")
+            _write_plan_csv(kept, csv_path)
+            _print_plan_summary(plan_id, "inbox", kept, csv_path, stats)
+            moved = 0
+            if args.apply:
+                report = _apply_items(kept, inbox_path, args, conn, plan_id)
+                moved = (report or {}).get("moved", 0)
+        except SystemExit as e:
+            _record_inbox_failure(conn, inbox_path, args, e)
+            raise
+        except Exception as e:  # noqa: BLE001 - 失败记 job 行后原样抛出
+            _record_inbox_failure(conn, inbox_path, args, e)
+            raise
+        n_move = sum(1 for i in kept if i.get("action") in ("move", "rename"))
+        n_review = sum(1 for i in kept if i.get("action") == "review")
+        if getattr(args, "watch", False) and not kept and not moved:
+            return plan_id  # 自动空扫：不留行
+        job = _CliJob(conn, "plan",
+                      {"source": "inbox-watch" if getattr(args, "watch", False) else "cli",
+                       "root": inbox_path, "library": "inbox"})
+        job.done({"plan_id": plan_id, "move": n_move, "review": n_review,
+                  "moved": moved})
         return plan_id
 
     if not args.watch:
