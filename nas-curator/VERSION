@@ -1,5 +1,5 @@
 {
-  "date": "2026-11-20",
-  "notes": "总览页白屏修复 + 任务记录补全：总览页 index.html 第 133–134 行 var cards 重复致内联脚本解析失败、白屏“加载中”，已删重复行并加模板 JS 解析回归测试；CLI plan/apply/rollback 与收件箱监听补 job 记录（任务页与总览最近任务可见，进行中/已完成/失败与起止时间），收件箱 30 分钟自动空扫 0 项不留行；回填历史计划的 done 行；部署核查清单加模板内联 JS 跑 node --check。",
-  "version": "0.1.7"
+  "date": "2026-11-21",
+  "notes": "视频抽帧改走 cv2.VideoCapture，彻底去掉 ffmpeg 子进程依赖：容器镜像自始未装 ffmpeg/sudo，12,696 条视频因此 decode_failed 落待确认；改后 .mov/.mp4/.avi/.wmv/.mts 等完好视频均可抽帧，.livp 解包取 .mov 帧或 .jpg 静帧；真损坏文件仍进 decode_failed。另补 PLAN_KEYS 缺失的 score/auto_exempt 两列断言。",
+  "version": "0.1.8"
 }

@@ -4,7 +4,8 @@
 
 只用本机 /tmp：PIL 生成纯色/随机噪声测试图；跑 decode_item、
 decide() 纯逻辑分支、plan_media_files(classifier=None)、plan_inbox、
-video_frames 失败路径、build_report 纯函数。
+video_frames 失败路径、build_report 纯函数；0.1.8 新增 cv2 视频抽帧
+与 .livp 解包测试（有 cv2 才跑、无 cv2 时 skip，见各测试）。
 
 运行：python3 tests/test_media_core_smoke.py
 （本机无 pytest：文件自带 __main__ runner；有 pytest 时也可 pytest 运行，
@@ -13,6 +14,9 @@ video_frames 失败路径、build_report 纯函数。
 本机环境说明（2026-11-19 实测）：Python 3.12、PIL/numpy 有、cv2/torch 无。
 因此 decode_item 在本机走 decode_failed 分支（缺 cv2），测试对该分支
 做了断言；cv2 存在时的 blur 数值分支用条件断言（有 cv2 才跑）。
+0.1.8：视频抽帧改走 cv2.VideoCapture（不再调 ffmpeg 子进程），缺 cv2
+时 video_frames 返回 []（与旧版 ffmpeg 缺失时一致）；.livp 解包取帧
+不依赖 cv2（.jpg 静帧分支），.mov 分支需 cv2。
 """
 from __future__ import annotations
 
@@ -52,7 +56,11 @@ def _is_skip_exc(e):
 
 PLAN_KEYS = {"src", "dst", "new_name", "category", "confidence", "reason",
              "evidence", "action", "kind", "size", "ext", "sha256", "tags",
-             "review_kind", "file_id"}
+             "review_kind", "file_id", "score", "auto_exempt"}
+# 0.1.8 补：engine._base_item 自 0.1.1 起就出 "score" 与 "auto_exempt"
+# （plan_items 表亦有此二列），旧 PLAN_KEYS 漏了它们，PIL 齐全的环境
+# 下 test_plan_media_files_no_classifier 的精确键集断言必失败；
+# P10 的 132 passed 应是该测试被 PIL 缺失跳过所致。
 
 THRESHOLDS = {"margin_min": 0.12, "score_min": 0.35, "blur_min": 50,
               "phash_max_distance": 5, "near_dup_enabled": True}
@@ -266,6 +274,92 @@ def test_video_frames_missing_file():
     assert video_frame("/tmp/does-not-exist-xyz.mp4") is None
     assert video_frames("/tmp/does-not-exist-xyz.mp4") == []
     assert video_frames("/tmp/does-not-exist-xyz.mp4", max_frames=6, step=10) == []
+
+
+def test_video_frames_cv2_synthetic():
+    """0.1.8：cv2 抽帧——合成一段小 mp4，video_frames 应返回 PIL RGB 帧。
+
+    无 cv2 时 skip（本机无 cv2；NAS 容器内有 cv2 4.10.0，跑此分支）。
+    短片（3 秒）只在 0 秒处有帧：断言 ≥1 帧且均为 RGB，不硬编帧数，
+    避免末尾时间点取舍的抖动。
+    """
+    cv2 = _require("cv2")
+    np = _require("numpy")
+    from PIL import Image
+    from media_core.curate import video_frame, video_frames
+    with tempfile.TemporaryDirectory() as tmp:
+        p = os.path.join(tmp, "clip.mp4")
+        w = cv2.VideoWriter(p, cv2.VideoWriter_fourcc(*"mp4v"),
+                            10.0, (320, 240))
+        assert w.isOpened(), "VideoWriter 打不开测试 mp4"
+        for i in range(30):
+            w.write(np.full((240, 320, 3), (i * 8 % 256, 100, 200),
+                            dtype="uint8"))
+        w.release()
+        assert os.path.getsize(p) > 0
+        frames = video_frames(p)
+        assert len(frames) >= 1, "3 秒短片至少应在 0 秒处抽到 1 帧"
+        for fr in frames:
+            assert isinstance(fr, Image.Image) and fr.mode == "RGB"
+            assert fr.size[0] > 0 and fr.size[1] > 0
+        one = video_frame(p, "0")
+        assert isinstance(one, Image.Image) and one.mode == "RGB"
+        # 超片长的时间点抽不到：只返回已有帧，不重复首帧。
+        assert video_frames(p, max_frames=6, step=10) == frames
+        # 损坏文件（非视频字节）：打不开 → 空列表，不抛错。
+        bad = os.path.join(tmp, "bad.mp4")
+        with open(bad, "wb") as f:
+            f.write(os.urandom(2048))
+        assert video_frames(bad) == []
+        assert video_frame(bad) is None
+
+
+def _make_livp(tmp, name, jpg=True, mov_bytes=None):
+    """生成一个 .livp（zip）：可含 .jpg 静帧和/或 .mov 内容。"""
+    import zipfile
+    from PIL import Image
+    p = os.path.join(tmp, name)
+    with zipfile.ZipFile(p, "w") as z:
+        if jpg:
+            jp = os.path.join(tmp, "still.jpg")
+            Image.new("RGB", (200, 150), (10, 200, 90)).save(jp)
+            z.write(jp, "IMG_0001.JPG")
+        if mov_bytes is not None:
+            z.writestr("IMG_0001.MOV", mov_bytes)
+    return p
+
+
+def test_livp_still_frame():
+    """0.1.8：.livp 解包——.jpg 静帧应解出 1 帧（不依赖 cv2）；只有损坏
+    .mov 时返回 []（不抛错）。"""
+    from media_core.curate import _decode_livp_frames
+    with tempfile.TemporaryDirectory() as tmp:
+        good = _make_livp(tmp, "good.livp", jpg=True)
+        frames = _decode_livp_frames(good)
+        assert len(frames) == 1 and frames[0].mode == "RGB", frames
+        bad = _make_livp(tmp, "bad.livp", jpg=False,
+                         mov_bytes=os.urandom(4096))
+        assert _decode_livp_frames(bad) == []
+        assert _decode_livp_frames(os.path.join(tmp, "nope.livp")) == []
+        assert _decode_livp_frames(good + ".missing") == []
+
+
+def test_decode_item_livp():
+    """0.1.8：decode_item 走 .livp 分支——有 cv2 时静帧应解码成功；
+    缺 cv2 时与照片同一口径（_image_features 报 ModuleNotFoundError）。"""
+    _require("PIL")
+    from media_core.curate import decode_item
+    with tempfile.TemporaryDirectory() as tmp:
+        livp = _make_livp(tmp, "test.livp", jpg=True)
+        row = {"path": livp, "name": "test.livp", "kind": "照片",
+               "size": os.path.getsize(livp), "mtime": 0, "ext": ".livp"}
+        img, blur, white, colors, ar, note = decode_item(row)
+        if importlib.util.find_spec("cv2") is None:
+            assert img is None and note == "ModuleNotFoundError", \
+                "缺 cv2 时应为 decode 失败，note=%r" % note
+        else:
+            assert img is not None and note == "", "有 cv2 时静帧应解码成功"
+            assert blur >= 0
 
 
 def test_build_report_is_pure():

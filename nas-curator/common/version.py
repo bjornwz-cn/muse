@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""common.version —— 应用版本号（0.1.7）：VERSION 文件读写与语义比较。
+"""common.version —— 应用版本号（0.1.8）：VERSION 文件读写与语义比较。
 
-VERSION 文件（项目根目录，JSON）：{"version": "0.1.7", "date": "2026-11-20",
+VERSION 文件（项目根目录，JSON）：{"version": "0.1.8", "date": "2026-11-20",
 "notes": "..."}。构建时 COPY 进镜像 /app/VERSION，运行时 read_local_version()
 即当前版本；升级检查拿它与 GitHub 仓 nas-curator/VERSION 的最新版比较。
 比较规则：按数字段比较（0.1.10 > 0.1.9），允许 "v" 前缀与 "-beta" 这类后缀
@@ -33,7 +33,7 @@ def compare_versions(a, b) -> int:
     """比较版本号：a < b 返回 -1，相等 0，a > b 返回 1。
 
     数字段按位比较，短的补 0（如 0.1 == 0.1.0）；数字相等时带后缀的
-    （如 0.1.7-beta）小于不带后缀的正式版。
+    （如 0.1.8-beta）小于不带后缀的正式版。
     """
     na, sa = parse_version(a)
     nb, sb = parse_version(b)

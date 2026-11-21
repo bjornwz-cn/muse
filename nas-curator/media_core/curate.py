@@ -35,6 +35,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import time
 
@@ -460,20 +461,62 @@ PHOTO_CATEGORIES = tuple(PHOTO_PROMPTS_EN.keys())
 VIDEO_CATEGORIES = tuple(VIDEO_PROMPTS_EN.keys())
 
 
-def video_frame(path, ss='2'):
-    """原单帧采样：取 ss 秒处一帧（PIL RGB 图）；失败时回退到 ss='0'，仍失败返回 None。"""
-    from PIL import Image as I
+def _load_cv2():
+    """延迟加载 cv2（模块 import 时绝不加载 cv2/torch）；失败返回 None。
+
+    0.1.8：视频抽帧改走 cv2.VideoCapture，不再调 ffmpeg 子进程。
+    cv2 缺失时视频抽帧返回空（调用方按 decode_failed 处理，与旧版
+    ffmpeg 缺失时的行为一致）；照片的 _image_features 同样要求 cv2，
+    缺失时亦走 decode_failed（见测试 test_decode_item_returns_numbers）。
+    """
     try:
-        p = subprocess.run(['sudo', '-n', 'ffmpeg', '-nostdin', '-loglevel', 'error', '-ss', ss,
-                            '-i', path, '-frames:v', '1', '-vf', 'scale=448:-1',
-                            '-f', 'image2pipe', '-vcodec', 'mjpeg', 'pipe:1'],
-                           capture_output=True, timeout=40)
-        b = p.stdout
-        if b and len(b) > 2048:
-            return I.open(io.BytesIO(b)).convert('RGB')
-    except Exception:
+        import cv2
+        return cv2
+    except ImportError:
         pass
-    if ss != '0':
+    try:
+        ensure_cv2_first()
+        import cv2
+        return cv2
+    except Exception:
+        return None
+
+
+def _cap_frame(cv2, cap, ss):
+    """从已打开的 VideoCapture 取 ss 秒处一帧（PIL RGB 图）；抽不到返回 None。
+
+    cv2 读到的是 BGR 帧，转 RGB 后再包 PIL，与旧 ffmpeg 管道的 mjpeg 解码
+    结果一致（下游 _image_features / classifier.scores 均按 RGB 处理）。
+    seek 到关键帧后向前解码；超片长的时间点读不到，直接跳过（不回退到
+    0 秒，避免首帧被重复计票）。
+    """
+    from PIL import Image
+    try:
+        cap.set(cv2.CAP_PROP_POS_MSEC, float(ss) * 1000.0)
+    except Exception:
+        return None
+    try:
+        ok, frame = cap.read()
+    except Exception:
+        return None
+    if not ok or frame is None or frame.size == 0:
+        return None
+    try:
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    except Exception:
+        return None
+    return Image.fromarray(rgb)
+
+
+def video_frame(path, ss='2'):
+    """原单帧采样：取 ss 秒处一帧（PIL RGB 图）；失败时回退到 ss='0'，仍失败返回 None。
+
+    0.1.8：改走 cv2.VideoCapture（不再调 ffmpeg 子进程）；回退语义不变。
+    """
+    img = _video_frame_at(path, ss)
+    if img is not None:
+        return img
+    if str(ss) != '0':
         return video_frame(path, '0')
     return None
 
@@ -481,37 +524,110 @@ def video_frame(path, ss='2'):
 def _video_frame_at(path, ss):
     """单次抽帧（无回退）：取 ss 秒处一帧；抽不到/超片长返回 None。
 
+    0.1.8：改走 cv2.VideoCapture（不再调 ffmpeg 子进程）。
     供 video_frames() 使用——多帧采样里某时间点抽不到只跳过该点，
     不应像 video_frame() 那样回退到 0 秒（否则首帧会被重复计票）。
+    cv2 缺失或打不开文件时返回 None。
     """
-    from PIL import Image as I
+    cv2 = _load_cv2()
+    if cv2 is None:
+        return None
     try:
-        p = subprocess.run(['sudo', '-n', 'ffmpeg', '-nostdin', '-loglevel', 'error', '-ss', ss,
-                            '-i', path, '-frames:v', '1', '-vf', 'scale=448:-1',
-                            '-f', 'image2pipe', '-vcodec', 'mjpeg', 'pipe:1'],
-                           capture_output=True, timeout=40)
-        b = p.stdout
-        if b and len(b) > 2048:
-            return I.open(io.BytesIO(b)).convert('RGB')
+        cap = cv2.VideoCapture(path)
     except Exception:
-        pass
-    return None
+        return None
+    if not cap.isOpened():
+        return None
+    try:
+        return _cap_frame(cv2, cap, ss)
+    finally:
+        cap.release()
 
 
 def video_frames(path, max_frames=6, step=10):
-    """视频多帧采样（v1）：首帧 + 每 step 秒一帧，上限 max_frames 帧。
+    """视频多帧采样（v2，0.1.8）：首帧 + 每 step 秒一帧，上限 max_frames 帧。
 
     时间点为 0, step, 2*step, …（默认 0/10/20/30/40/50 秒，最多 6 帧）；
-    超过片长的时间点 ffmpeg 抽不到，直接跳过——短视频自然只返回 1–2 帧。
+    超过片长的时间点抽不到，直接跳过——短视频自然只返回 1–2 帧。
     返回 PIL RGB 图列表（可能为空列表：全部抽帧失败时由调用方按
     decode_failed 处理）。每帧走同一套图片分类，众数投票在 engine 层做。
+    0.1.8 改动：同一 VideoCapture 只开一次、逐点 seek（不再每点拉起一次
+    ffmpeg 子进程）；cv2 缺失或打不开文件时返回 []。
     """
+    cv2 = _load_cv2()
+    if cv2 is None:
+        return []
+    try:
+        cap = cv2.VideoCapture(path)
+    except Exception:
+        return []
+    if not cap.isOpened():
+        return []
     frames = []
-    for i in range(max(0, int(max_frames))):
-        img = _video_frame_at(path, str(i * int(step)))
-        if img is not None:
-            frames.append(img)
+    try:
+        for i in range(max(0, int(max_frames))):
+            img = _cap_frame(cv2, cap, i * int(step))
+            if img is not None:
+                frames.append(img)
+    finally:
+        cap.release()
     return frames
+
+
+def _decode_livp_frames(path):
+    """Live Photo（.livp = zip，内含 .jpg 静帧 + .mov 视频）解包取帧。
+
+    优先用其中的 .mov 走 cv2 抽帧（与视频同一采样）；.mov 不可用则用
+    .jpg 静帧当一帧（.heic 静帧需 pillow_heif，已在模块 import 时注册，
+    无则打不开、跳过）。解包进临时目录，用后删除。全部不可用返回 []，
+    由调用方按 decode_failed 处理。
+    0.1.8 新增：旧版把 .livp 当照片直接 PIL 打开，zip 包必然报
+    UnidentifiedImageError，全数落到待确认（计划 #107 计 420 条）。
+    """
+    import tempfile
+    import zipfile
+    from PIL import Image
+    try:
+        zf = zipfile.ZipFile(path)
+    except Exception:
+        return []
+    tmpd = tempfile.mkdtemp(prefix='livp-')
+    try:
+        try:
+            names = zf.namelist()
+        except Exception:
+            return []
+        movs = [n for n in names if n.lower().endswith(('.mov', '.mp4'))]
+        jpgs = [n for n in names
+                if n.lower().endswith(('.jpg', '.jpeg', '.png', '.heic', '.heif'))]
+        for name in movs:
+            try:
+                target = os.path.join(tmpd, os.path.basename(name))
+                with zf.open(zf.getinfo(name), 'r') as src, \
+                        open(target, 'wb') as dst:
+                    shutil.copyfileobj(src, dst)
+                frames = video_frames(target)
+                if frames:
+                    return frames
+            except Exception:
+                continue
+        for name in jpgs:
+            try:
+                target = os.path.join(tmpd, os.path.basename(name))
+                with zf.open(zf.getinfo(name), 'r') as src, \
+                        open(target, 'wb') as dst:
+                    shutil.copyfileobj(src, dst)
+                im = Image.open(target)
+                return [im.convert('RGB')]
+            except Exception:
+                continue
+        return []
+    finally:
+        try:
+            zf.close()
+        except Exception:
+            pass
+        shutil.rmtree(tmpd, ignore_errors=True)
 
 
 def _image_features(img):
@@ -549,7 +665,13 @@ def decode_item_frames(row):
         src, tmpc = ensure_readable(row['path'])
         if not src:
             raise ValueError('unreadable')
-        if row['kind'] == '照片':
+        if row['ext'] == '.livp':
+            # Live Photo：zip 包，PIL 打不开；解包后取 .mov 抽帧或 .jpg 静帧。
+            # 0.1.8 新增（旧版全数报 UnidentifiedImageError，计划 #107 计 420 条）。
+            frames = _decode_livp_frames(src)
+            if not frames:
+                raise ValueError('noframe')
+        elif row['kind'] == '照片':
             im = Image.open(src)
             if row['ext'] in ('.jpg', '.jpeg', '.jfif'):
                 try:
