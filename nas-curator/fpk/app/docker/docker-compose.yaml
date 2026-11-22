@@ -1,4 +1,4 @@
-# NAS Curator（文件管家）0.1.8 —— 飞牛 App compose（由 fnpack 打包）。
+# NAS Curator（文件管家）0.1.9 —— 飞牛 App compose（由 fnpack 打包）。
 # 镜像须事先在 NAS 上 docker load（本机 VM 构建后传过去），故 pull_policy: never。
 # 端口：${TRIM_SERVICE_PORT}（来自 manifest service_port=8765）-> 容器 8000。
 #   不用向导端口字段（fn-fpk 已知坑：向导改端口后 TRIM_SERVICE_PORT 不变，
@@ -14,7 +14,7 @@
 #   （ollama-cpu 11434 / ollama-gpu 11500 / ocr-service 8866 均在宿主 docker 网桥上）。
 services:
   curator:
-    image: nas-curator:0.1.8
+    image: nas-curator:0.1.9
     container_name: nas-curator
     restart: unless-stopped
     pull_policy: never

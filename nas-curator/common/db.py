@@ -290,6 +290,20 @@ def mark_rolled_back(conn, op_id):
 
 # ---------------------------------------------------------------- review_queue
 
+def has_review_for_src(conn, src):
+    """0.1.9 去重：同一 src 是否已有复核行（pending，或已裁决 approved/rejected）。
+
+    复用 #142 重跑脚本的口径（建复核行前查 review_queue 同一 src 的 pending
+    行，有则跳过），并按 0.1.9 决议扩展到已裁决行——watcher 重复建计划时，
+    同一文件绝不再产生第二条复核行。plan_items 审计行不受影响（照常记）。
+    """
+    n = conn.execute(
+        "SELECT COUNT(*) FROM review_queue WHERE "
+        "json_extract(payload, '$.src')=? AND status IN ('pending','approved','rejected')",
+        (src,)).fetchone()[0]
+    return n > 0
+
+
 def add_review(conn, file_id=None, plan_id=None, kind=None, payload=None):
     cur = conn.execute(
         "INSERT INTO review_queue (file_id, plan_id, kind, payload) VALUES (?, ?, ?, ?)",

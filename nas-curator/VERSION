@@ -1,5 +1,1 @@
-{
-  "date": "2026-11-21",
-  "notes": "视频抽帧改走 cv2.VideoCapture，彻底去掉 ffmpeg 子进程依赖：容器镜像自始未装 ffmpeg/sudo，12,696 条视频因此 decode_failed 落待确认；改后 .mov/.mp4/.avi/.wmv/.mts 等完好视频均可抽帧，.livp 解包取 .mov 帧或 .jpg 静帧；真损坏文件仍进 decode_failed。另补 PLAN_KEYS 缺失的 score/auto_exempt 两列断言。",
-  "version": "0.1.8"
-}
+{"date":"2026-11-23","notes":"复核去重：建复核行前查 review_queue，同一 src 已有 pending 或已裁决（approved/rejected）行时跳过建行，plan_items 审计行照常记；覆盖 _store_plan（CLI plan / watcher inbox-watch / process，文档与媒体引擎）、_apply_items 门控、api.jobs._run_auto_apply 三条建行路径。根因：计划引擎不查 review_queue/plan_items、不去重，watcher 对同一批百度网盘回下载（约 10,794 个文件）重复建计划 #143/#144/#145 三遍，致复核队列 91,070 行、唯一文件仅 31,193 个。另加回归测试 tests/test_review_dedup.py（5 项：同一批文件规划两次只一条 pending 行、已裁决不再重建、两条门控路径各跑两次）。不动 0.85 自动执行线与 decide() 的 score_min/margin_min 门限。","version":"0.1.9"}

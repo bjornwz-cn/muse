@@ -443,16 +443,25 @@ def _write_plan_csv(items, out_path):
 
 
 def _store_plan(conn, library_id, rules_version, items):
-    """写 plans + plan_items + review_queue。返回 plan_id。"""
+    """写 plans + plan_items + review_queue。返回 plan_id。
+
+    0.1.9 去重（复用 #142 重跑脚本口径）：建复核行前查 review_queue，
+    同一 src 已有 pending 或已裁决（approved/rejected）行时跳过建行——
+    watcher 对同一批文件重复建计划不再产生第二条待处理行；plan_items
+    审计行照常记。"""
     summary = {"n": len(items),
                "move": sum(1 for i in items if i.get("action") == "move"),
                "rename": sum(1 for i in items if i.get("action") == "rename"),
                "review": sum(1 for i in items if i.get("action") == "review"),
                "skip": sum(1 for i in items if i.get("action") == "skip")}
     plan_id = DB.create_plan(conn, library_id, rules_version, summary)
+    n_dup_skipped = 0
     for it in items:
         DB.add_plan_item(conn, plan_id, it)
         if it.get("action") == "review":
+            if DB.has_review_for_src(conn, it.get("src")):
+                n_dup_skipped += 1
+                continue
             DB.add_review(conn, file_id=it.get("file_id"), plan_id=plan_id,
                           kind=it.get("review_kind") or "low_conf",
                           payload={"src": it.get("src"), "category": it.get("category"),
@@ -461,6 +470,8 @@ def _store_plan(conn, library_id, rules_version, items):
                                    "evidence": it.get("evidence"),
                                    "suggested_dst": it.get("dst"),
                                    "tags": it.get("tags") or []})
+    if n_dup_skipped:
+        print(f"  复核去重：{n_dup_skipped} 项已有复核行（待处理或已裁决），不再新建复核行")
     return plan_id
 
 
@@ -833,6 +844,9 @@ def _apply_items(items, root, args, conn, plan_id):
     if held:
         print(f"  自动执行门控：{len(held)} 项置信度 < {threshold}，不自动移动，进复核队列")
         for i in held:
+            # 0.1.9 去重：同一 src 已有复核行（待处理或已裁决）时不再新建
+            if DB.has_review_for_src(conn, i.get("src")):
+                continue
             DB.add_review(conn, file_id=i.get("file_id"), plan_id=plan_id,
                           kind="low_conf",
                           payload={"src": i.get("src"), "category": i.get("category"),

@@ -158,6 +158,10 @@ def _run_auto_apply(job_id: int, db_path: str, plan_id: int, threshold: float):
                 # 复核队列里看不到、文件会静默留在原地无人处理。
                 conn.execute("UPDATE plan_items SET status='skipped' WHERE id=?",
                              (it["id"],))
+                # 0.1.9 去重：同一 src 已有复核行（待处理或已裁决）时不再新建
+                if DB.has_review_for_src(conn, it.get("src")):
+                    skipped += 1
+                    continue
                 DB.add_review(conn, file_id=it.get("file_id"), plan_id=plan_id,
                               kind="low_conf",
                               payload={"src": it.get("src"),
