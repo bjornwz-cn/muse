@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}NAS Curator{% endblock %} · NAS Curator 文件管家</title>
-<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/style.css?v={{ app_version }}">
 </head>
 <body>
 <header class="topbar">
@@ -29,7 +29,7 @@
   <span>NAS Curator · 高置信自动执行，低置信进复核；绝不删原件，执行可回滚。</span>
 </footer>
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v={{ app_version }}"></script>
 {% block scripts %}{% endblock %}
 </body>
 </html>

@@ -19,6 +19,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from common import db as DB
+from common.version import read_local_version
 from . import browse, dashboard, files, jobs, review, rules, settings, upgrade, wizard
 from .deps import ensure_config, get_db_path, is_setup_done
 
@@ -49,6 +50,11 @@ class SetupRedirectMiddleware(BaseHTTPMiddleware):
 def create_app() -> FastAPI:
     app = FastAPI(title="NAS Curator", version="0.2.0", lifespan=lifespan)
     app.add_middleware(SetupRedirectMiddleware)
+    # 静态资源缓存破坏：版本号取自 VERSION 文件（启动时读一次），
+    # base.html 的 app.js/style.css 带 ?v=<版本>；升版后 URL 变化，
+    # 浏览器不再用旧版缓存的 JS（0.2.0 教训：旧 app.js 无 C.progressBar，
+    # 模板却调用它，报「C.progressBar is not a function」）。
+    app_version = read_local_version()["version"]
 
     for mod in (dashboard, review, jobs, browse, rules, settings, upgrade,
                 wizard, files):
@@ -64,7 +70,8 @@ def create_app() -> FastAPI:
     def index(request: Request):
         if templates is not None and os.path.exists(
                 os.path.join(TEMPLATES_DIR, "index.html")):
-            return templates.TemplateResponse(request, "index.html", {})
+            return templates.TemplateResponse(request, "index.html",
+                                              {"app_version": app_version})
         # 前端模板未落盘时的内置极简总览页（P2 前端到位后自动改走模板）。
         return HTMLResponse(
             "<!DOCTYPE html><html lang='zh-CN'><head><meta charset='utf-8'>"
@@ -86,7 +93,8 @@ def create_app() -> FastAPI:
         def _page_view(request: Request, _name=_page):
             if templates is not None and os.path.exists(
                     os.path.join(TEMPLATES_DIR, _name + ".html")):
-                return templates.TemplateResponse(request, _name + ".html", {})
+                return templates.TemplateResponse(request, _name + ".html",
+                                                  {"app_version": app_version})
             return HTMLResponse(
                 f"<h1>{_name} 模板尚未落盘</h1>", status_code=404)
         app.get("/" + _page, response_class=HTMLResponse)(_page_view)

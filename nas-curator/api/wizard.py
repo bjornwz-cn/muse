@@ -22,6 +22,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
+from common.version import read_local_version
 from .deps import (ENV_LOCAL, LIBRARIES_JSON, get_settings, is_setup_done,
                    key_env_var, load_libraries, mark_setup_done, mask_key,
                    public_settings)
@@ -45,7 +46,9 @@ class SetupBody(BaseModel):
 @router.get("/setup", response_class=HTMLResponse)
 def setup_page(request: Request):
     templates = Jinja2Templates(directory=TEMPLATES_DIR)
-    return templates.TemplateResponse(request, "setup.html", {})
+    return templates.TemplateResponse(
+        request, "setup.html",
+        {"app_version": read_local_version()["version"]})
 
 
 @router.get("/api/setup")
