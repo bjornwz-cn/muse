@@ -1,1 +1,1 @@
-{"notes":"腾讯云实时识别接入：新增第 8 个引擎「云端 · 腾讯实时识别」，日/韩真流式边说边出字，每月免费 5 小时。需在引擎设置里填 AppId/SecretId/SecretKey；翻译方向选日→中或韩→中，不要选自动。","url":"https://raw.githubusercontent.com/bjornwz-cn/muse/main/update/earbuddy-latest.apk","versionCode":48,"versionName":"0.9.0"}
+{"notes":"修复开始翻译闪退：腾讯引擎启动全程兜底（客户端创建/请求构建/启动失败不再闪退，改报错误并记入诊断日志），服务启动前同步记录引擎/方向/密钥状态/权限，方便定位。实时翻译设置按识别/翻译/会话/其他四组重排：引擎密钥收进二级入口，识别精度与模型导入只在离线引擎时显示，新增检查更新与诊断入口。","url":"https://raw.githubusercontent.com/bjornwz-cn/muse/main/update/earbuddy-latest.apk","versionCode":49,"versionName":"0.9.1"}
