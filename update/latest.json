@@ -1,1 +1,1 @@
-{"notes":"方向 A：日/韩流式化改造。实测火山流式 ASR 不支持日语（只出罗马音），改走流式化的一句话识别：能量 VAD 按真实停顿切段（有声≥2 秒＋静音≥0.7 秒，单段最长 6 秒），聚合器按音频时间计时，识别失败重试 1 次并记 asr_retry。仍是一句话模式，达不到真流式边说边出字；自动模式说日语仍未解。","url":"https://raw.githubusercontent.com/bjornwz-cn/muse/main/update/earbuddy-latest.apk","versionCode":47,"versionName":"0.8.9"}
+{"notes":"腾讯云实时识别接入：新增第 8 个引擎「云端 · 腾讯实时识别」，日/韩真流式边说边出字，每月免费 5 小时。需在引擎设置里填 AppId/SecretId/SecretKey；翻译方向选日→中或韩→中，不要选自动。","url":"https://raw.githubusercontent.com/bjornwz-cn/muse/main/update/earbuddy-latest.apk","versionCode":48,"versionName":"0.9.0"}
