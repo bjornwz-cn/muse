@@ -179,6 +179,28 @@ def test_derive_year_progress_done_when_summary_exists(tmp_path):
     assert rec["extra"]["unclassified"] == 120
 
 
+def test_derive_year_done_when_all_classified(tmp_path):
+    # SigLIP 跑满：JSONL 14,815 行 − 已有 500 行 = done 14,315 = total。
+    # 该阶段已完成：status 必须是 done（不是 running），且不标 stale——
+    # 否则线上会同时显示“进行中 100%”和“已失联”。
+    # 文件 mtime 故意设旧（14:00，now 16:00，相隔 2 小时）以证明：
+    # 即使超过 10 分钟未更新，已完成的阶段也不算失联。
+    d = tmp_path
+    _write_year_fixtures(d, n_results=14815, total=14315, elapsed=6821)
+    log = (d / "year_siglip.log").read_text(encoding="utf-8")
+    log = log.replace("already classified in /data/year_siglip_results.jsonl: 0",
+                      "already classified in /data/year_siglip_results.jsonl: 500")
+    (d / "year_siglip.log").write_text(log, encoding="utf-8")
+    old = 1763887200  # 2026-11-23T14:00:00+08:00
+    os.utime(d / "year_siglip_results.jsonl", (old, old))
+    os.utime(d / "year_siglip.log", (old, old))
+    rec = PROG.derive_year_progress(str(d), now="2026-11-23T16:00:00")
+    assert rec["total"] == 14315 and rec["done"] == 14315
+    assert rec["pct"] == 100.0 and rec["pending"] == 0
+    assert rec["status"] == "done" and rec["stale"] is False
+    assert rec["finished"] is True
+
+
 def test_derive_year_progress_subtracts_preexisting_lines(tmp_path):
     # 真实情况（2026-11-23 实测）：JSONL 在本轮开始前已有 500 行（上一轮
     # 断点续跑），直接数行数会把 done 算多 500、百分比破百。
@@ -247,6 +269,39 @@ def client(tmp_path_factory):
     jid4 = DB.create_job(conn, "plan")
     conn.execute(
         "UPDATE jobs SET started_at='2026-11-23T14:00:00' WHERE id=?", (jid4,))
+    # job 5/6：CLI apply 的真实情况——plan_items 从不写状态（全 pending），
+    # 且计划含 review 项（不是 apply 的工作）。job 5 已完成，summary
+    # moved=3；job 6 进行中。工作集只计 4 个 move 项，review 项排除。
+    def _cli_plan(n_move, n_review):
+        p = DB.create_plan(conn, "work", None, {"n": n_move + n_review})
+        for i in range(n_move):
+            DB.add_plan_item(conn, p, {
+                "src": "/tmp/c/%d.txt" % i, "dst": "/tmp/d/%d.txt" % i,
+                "category": "c", "confidence": 0.9, "reason": "rule",
+                "evidence": "", "action": "move", "kind": "document",
+                "size": 10, "ext": ".txt", "sha256": "", "tags": [],
+                "review_kind": None, "status": "pending"})
+        for i in range(n_review):
+            DB.add_plan_item(conn, p, {
+                "src": "/tmp/c/r%d.txt" % i, "dst": "",
+                "category": "c", "confidence": 0.4, "reason": "low",
+                "evidence": "", "action": "review", "kind": "document",
+                "size": 10, "ext": ".txt", "sha256": "", "tags": [],
+                "review_kind": "low_conf", "status": "pending"})
+        return p
+    pid3 = _cli_plan(4, 2)
+    jid5 = DB.create_job(conn, "apply")
+    conn.execute(
+        "UPDATE jobs SET started_at='2026-11-23T14:00:00',"
+        " finished_at='2026-11-23T14:05:00', summary=? WHERE id=?",
+        (json.dumps({"plan_id": pid3, "moved": 3, "failed": 0}), jid5))
+    conn.execute("UPDATE jobs SET status='done' WHERE id=?", (jid5,))
+    pid4 = _cli_plan(4, 2)
+    jid6 = DB.create_job(conn, "apply")
+    conn.execute(
+        "UPDATE jobs SET started_at='2026-11-23T14:00:00',"
+        " summary=? WHERE id=?",
+        (json.dumps({"plan_id": pid4}), jid6))
     conn.commit()
     conn.close()
     from fastapi.testclient import TestClient
@@ -277,6 +332,21 @@ def test_api_jobs_list_has_progress(client):
     assert jobs[4]["progress"]["total"] is None
     assert jobs[4]["progress"]["pct"] is None
     assert jobs[4]["progress"]["phase"] == "计划中"
+    # CLI apply 已完成：项状态全 pending 也不能显示 0%——summary 说
+    # moved=3，工作集 4 个 move 项（2 个 review 项不计入）→ done 3、
+    # skipped 1（已在目标位置）、pct 100%。
+    assert jobs[5]["progress"]["total"] == 4
+    assert jobs[5]["progress"]["done"] == 3
+    assert jobs[5]["progress"]["skipped"] == 1
+    assert jobs[5]["progress"]["pending"] == 0
+    assert jobs[5]["progress"]["pct"] == 100.0
+    assert jobs[5]["progress"]["phase"] == "已完成"
+    # CLI apply 进行中：如实显示项状态，工作集仍只计 4 个 move 项。
+    assert jobs[6]["progress"]["total"] == 4
+    assert jobs[6]["progress"]["done"] == 0
+    assert jobs[6]["progress"]["pending"] == 4
+    assert jobs[6]["progress"]["pct"] == 0.0
+    assert jobs[6]["progress"]["phase"] == "执行中"
 
 
 def test_api_job_progress_detail_failed_items(client):
@@ -303,9 +373,10 @@ def test_api_running_includes_job_and_heartbeat(client):
     r = c.get("/api/jobs/running")
     assert r.status_code == 200, r.text
     d = r.json()
-    assert [j["id"] for j in d["jobs"]] == [4, 1]  # 只有 running 的 job（倒序）
-    assert d["jobs"][1]["progress"]["total"] == 5  # job 1（apply）
-    assert d["jobs"][0]["progress"]["total"] is None  # job 4（plan 生成中）
+    assert [j["id"] for j in d["jobs"]] == [6, 4, 1]  # 只有 running 的 job（倒序）
+    assert d["jobs"][2]["progress"]["total"] == 5  # job 1（apply）
+    assert d["jobs"][1]["progress"]["total"] is None  # job 4（plan 生成中）
+    assert d["jobs"][0]["progress"]["total"] == 4  # job 6（apply，工作集不含 review）
     scripts = {t["task_id"]: t for t in d["scripts"]}
     assert "vlm-reclassify" in scripts
     assert scripts["vlm-reclassify"]["done"] == 30

@@ -335,5 +335,14 @@ def derive_year_progress(data_dir=None, now=None):
         upd = parse_ts(updated)
         if upd is not None:
             rec["stale"] = (now_dt - upd).total_seconds() > STALE_AFTER_S
+    # SigLIP 阶段跑满（done >= total）：该阶段已完成，不再报 running，
+    # 也不标 stale（stale 只针对还在跑却失联的任务）；否则一个 100% 的
+    # 任务会同时显示“进行中”和“已失联”。后续阶段（register/vlm/summary）
+    # 的心跳接管同一 task_id 后会再把它翻回 running。
+    if total and done >= total:
+        rec["status"] = "done"
+        rec["stale"] = False
     rec.update(prog)
+    if rec["status"] == "done":
+        rec["finished"] = True
     return rec

@@ -267,6 +267,26 @@ def _plan_counts(conn, plan_id: int) -> dict:
     return counts
 
 
+def _apply_counts(conn, plan_id: int) -> dict:
+    """apply 任务的工作集计数：只计非 review 项。
+
+    review 项（action='review'）从来不是 apply 要移动的——
+    把它们算进总数，执行进度永远到不了 100%（如 #107：31,493 个
+    review 项会一直 pending）。move/rename 才是 apply 的工作集；
+    工作集为空时回退到全部项（纯复核计划被 apply 的极端情况）。
+    """
+    counts = {"done": 0, "pending": 0, "skipped": 0, "failed": 0}
+    for r in conn.execute(
+            "SELECT status, COUNT(*) AS n FROM plan_items"
+            " WHERE plan_id=? AND (action IS NULL OR action != 'review')"
+            " GROUP BY status", (plan_id,)):
+        st = (r["status"] or "pending").lower()
+        counts[st if st in counts else "pending"] += int(r["n"])
+    if sum(counts.values()) == 0:
+        return _plan_counts(conn, plan_id)
+    return counts
+
+
 def _phase_for(job_kind, plan_status, job_status) -> str:
     """当前阶段（中文）：按 plan 状态优先，其次按任务类型。"""
     if job_status == "done":
@@ -314,9 +334,30 @@ def _job_progress(conn, job: dict) -> dict:
             else:  # running：计划尚未写入 / 回滚尚未结束，总数未知
                 p = PROG.compute_progress(None, 0, 0, 0, started, None)
         else:
-            # apply：按 plan_items 状态计执行进度。
-            p = PROG.compute_progress(total, counts["done"], counts["skipped"],
-                                      counts["failed"], started, finished)
+            # apply：按 plan_items 状态计执行进度（工作集为非 review 项）。
+            # 但 CLI apply 从不写 plan_items 状态（#107/#142 的项至今全是
+            # pending），已完成任务不能因此显示 0%：status 为 done 时，
+            # 以 job summary（apply 自己的执行报告：moved/failed）为准
+            # 兜底——done 取两边最大值，剩余未移动项是已在目标位置
+            # （如 #142 的 6,408 个）或无需移动的，计 skipped；pending 归零。
+            # vlm_apply 这类写了项状态的任务不受影响（max 取项状态值）。
+            # running/failed 任务不用兜底：如实显示当前项状态。
+            counts = _apply_counts(conn, plan_id)
+            total = sum(counts.values())
+            if status == "done":
+                moved = int((summary.get("moved") or 0)) if isinstance(
+                    summary, dict) else 0
+                failed_n = int((summary.get("failed") or 0)) if isinstance(
+                    summary, dict) else 0
+                done_n = max(counts["done"], min(moved, total))
+                failed_n = max(counts["failed"], min(failed_n, total - done_n))
+                skipped_n = max(0, total - done_n - failed_n)
+                p = PROG.compute_progress(total, done_n, skipped_n, failed_n,
+                                          started, finished)
+            else:
+                p = PROG.compute_progress(total, counts["done"],
+                                          counts["skipped"], counts["failed"],
+                                          started, finished)
         p["phase"] = _phase_for(kind, (plan or {}).get("status"), status)
         p["plan_id"] = plan_id
         return p
