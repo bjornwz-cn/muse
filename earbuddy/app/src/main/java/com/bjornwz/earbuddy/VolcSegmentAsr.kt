@@ -53,9 +53,13 @@ object VolcSegmentAsr {
     /** 进行中的连接：会话停止时 cancelAll() 立即掐断，避免停止后重试/报错还继续写日志。 */
     private val activeSockets =
         Collections.synchronizedSet(mutableSetOf<WebSocket>())
+    /** 代际：cancelAll() 后 +1；在旧代际下跑的请求回调一律丢弃（不重试、不回写），
+     *  否则掐断会触发 onFailure → finish → 重试，新请求又跑满 12 秒才报错。 */
+    @Volatile private var gen = 0
 
-    /** 掐断全部进行中的一句话识别请求（会话停止/销毁时调）。已在跑的回调会被丢弃，不再回写。 */
+    /** 掐断全部进行中的一句话识别请求（会话停止/新会话开始时调）。已在跑的回调会被丢弃，不再回写。 */
     fun cancelAll() {
+        gen++
         val copy = synchronized(activeSockets) { activeSockets.toList() }
         activeSockets.clear()
         copy.forEach { try { it.cancel() } catch (e: Exception) { } }
@@ -72,6 +76,7 @@ object VolcSegmentAsr {
 
     private fun transcribeAttempt(ctx: Context, apiKey: String, pcm: ByteArray, lang: String, cb: (String?, String?) -> Unit, attempt: Int) {
         if (pcm.isEmpty() || apiKey.isEmpty()) { cb(null, "音频为空或火山 Key 未填"); return }
+        val myGen = gen
         val langFull = when (lang) {
             "ja" -> "ja-JP"
             "ko" -> "ko-KR"
@@ -92,6 +97,12 @@ object VolcSegmentAsr {
             if (done) return
             done = true
             main.removeCallbacks(watchdog)
+            // 代际已变（会话已停或新会话已起）：悄悄丢弃，不重试、不回写。
+            if (myGen != gen) {
+                socket?.let { activeSockets.remove(it) }
+                try { socket?.cancel() } catch (e: Exception) { }
+                return
+            }
             socket?.let { activeSockets.remove(it) }
             try { socket?.cancel() } catch (e: Exception) { }
             val finalText = text?.ifBlank { null }

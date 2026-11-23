@@ -172,6 +172,8 @@ class TranslateService : Service() {
 
     private fun startSessionInner() {
         if (running) return
+        // v0.9.2：新代际——掐断上一场收尾时还在跑的识别请求，避免它的结果串进本场。
+        VolcSegmentAsr.cancelAll()
         startForegroundCompat()
         from = TranslateStore.dirFrom(this)
         to = TranslateStore.dirTo(this)
@@ -554,13 +556,16 @@ class TranslateService : Service() {
                 if (text.isNullOrBlank()) {
                     // v0.9.2：报错必须可见（状态栏 + 翻译页红字 + toast），并把真实原因记进日志。
                     // 旧代码只记秃秃的 asr_error，2026-11-23 当天全是 12 秒无响应却查不出原因。
+                    // 会话已停时只记日志、不再弹提示（收尾段的请求可能在停后才回）。
                     val why = reason ?: "识别失败（原因未知）"
                     DiagLog.log(this, "asr_error", mapOf(
                         "engine" to "volc_nostream", "lang" to effFrom,
                         "reason" to why.take(200)
                     ))
-                    status("❌ 识别失败：$why")
-                    TranslateControl.publishError("识别失败：$why")
+                    if (running) {
+                        status("❌ 识别失败：$why")
+                        TranslateControl.publishError("识别失败：$why")
+                    }
                 }
                 val srcFinal = text?.takeIf { it.isNotBlank() } ?: ""
                 if (srcFinal.isNotBlank()) feedSentence(srcFinal, audioEndSec)
@@ -677,10 +682,15 @@ class TranslateService : Service() {
 
     fun stopSession() {
         if (!running) {
+            VolcSegmentAsr.cancelAll()
             stopForegroundCompat()
             stopSelf()
             return
         }
+        // v0.9.2：先掐断本场进行中的识别请求（代际+1，回调悄悄丢弃），再切收尾段——
+        // 收尾段是新代际，仍可正常识别出最后一句；旧代码停后请求还跑，12 秒后重试、
+        // 24 秒后才报 asr_error，日志里看着像停后还在出错。
+        VolcSegmentAsr.cancelAll()
         // 尾巴句先提交翻译（与此前行为一致）
         if (vadMode) {
             vadHandler.removeCallbacks(vadTicker); vadTicking = false
@@ -713,9 +723,6 @@ class TranslateService : Service() {
         handler.removeCallbacks(callWatcher)
         volc?.closeNow(); volc = null
         tx?.closeNow(); tx = null
-        // v0.9.2：掐断进行中的一句话识别请求——旧代码停会话后请求还在跑，
-        // 12 秒后重试、24 秒后才报 asr_error，日志里看着像停后还在出错。
-        VolcSegmentAsr.cancelAll()
         VoskManager.pauseCapture(this)
         // 录音收尾：WAV 落盘 → 后台转 m4a（成功后删 WAV 省空间）
         val sid = startedAt
