@@ -23,13 +23,14 @@ from common import progress as PROG
 
 def test_compute_progress_normal():
     # 100 项，10 分钟前开始，已做 60、跳过 10、问题 5 → 待处理 25，
-    # 速率 6 项/分钟，ETA 25/6 分钟 = 250 秒。
+    # pct 按已解决（60+10）/100 = 70.0（跳过是已决定的不做项，计入进度；
+    # 问题不计入）；速率 6 项/分钟，ETA 25/6 分钟 = 250 秒。
     p = PROG.compute_progress(100, 60, 10, 5,
                               "2026-11-23T14:00:00", None,
                               "2026-11-23T14:10:00")
     assert p["total"] == 100 and p["done"] == 60
     assert p["pending"] == 25 and p["skipped"] == 10 and p["failed"] == 5
-    assert p["pct"] == 60.0
+    assert p["pct"] == 70.0
     assert p["rate_per_min"] == 6.0
     assert p["eta_seconds"] == 250
     assert p["elapsed_s"] == 600
@@ -76,7 +77,7 @@ def test_heartbeat_roundtrip(tmp_path):
         errors=["rq=1: api_error"], now="2026-11-23T14:10:00")
     assert rec["task_id"] == "vlm-apply"
     assert rec["total"] == 100 and rec["done"] == 40
-    assert rec["pending"] == 53 and rec["pct"] == 40.0
+    assert rec["pending"] == 53 and rec["pct"] == 45.0  # (40+5)/100
     assert rec["source"] == "heartbeat"
     assert os.path.exists(os.path.join(d, "vlm-apply.json"))
     rows = PROG.read_heartbeats(d, now="2026-11-23T14:10:00")
@@ -225,6 +226,27 @@ def client(tmp_path_factory):
     # job 2：plan 已完成（无 plan 项，summary 有计数）。
     jid2 = DB.create_job(conn, "plan")
     DB.finish_job(conn, jid2, "done", {"plan_id": None, "move": 3, "review": 2})
+    # job 3：plan 已完成，但计划项全是 pending（待执行是下一阶段的事）——
+    # 计划任务本身已完成，进度必须按 100% 计，不能显示 0%。
+    pid2 = DB.create_plan(conn, "work", None, {"n": 2})
+    for i in range(2):
+        DB.add_plan_item(conn, pid2, {
+            "src": "/tmp/z/%d.txt" % i, "dst": "/tmp/y/%d.txt" % i,
+            "category": "c", "confidence": 0.9, "reason": "rule",
+            "evidence": "", "action": "move", "kind": "document",
+            "size": 10, "ext": ".txt", "sha256": "", "tags": [],
+            "review_kind": None, "status": "pending"})
+    jid3 = DB.create_job(conn, "plan")
+    conn.execute(
+        "UPDATE jobs SET started_at='2026-11-23T14:00:00',"
+        " finished_at='2026-11-23T14:01:00', summary=? WHERE id=?",
+        (json.dumps({"plan_id": pid2}), jid3))
+    conn.execute(
+        "UPDATE jobs SET status='done' WHERE id=?", (jid3,))
+    # job 4：plan 进行中（计划尚未生成，无 plan_id）——总数未知。
+    jid4 = DB.create_job(conn, "plan")
+    conn.execute(
+        "UPDATE jobs SET started_at='2026-11-23T14:00:00' WHERE id=?", (jid4,))
     conn.commit()
     conn.close()
     from fastapi.testclient import TestClient
@@ -238,14 +260,23 @@ def test_api_jobs_list_has_progress(client):
     assert r.status_code == 200, r.text
     jobs = {j["id"]: j for j in r.json()}
     p = jobs[1]["progress"]
-    # 真实计数：done 2 / pending 1 / skipped 1 / failed 1，总数 5。
+    # 真实计数：done 2 / pending 1 / skipped 1 / failed 1，总数 5；
+    # pct 按已解决（2+1）/5 = 60.0。
     assert p["total"] == 5 and p["done"] == 2 and p["pending"] == 1
     assert p["skipped"] == 1 and p["failed"] == 1
-    assert p["pct"] == 40.0 and p["phase"] == "执行中"
+    assert p["pct"] == 60.0 and p["phase"] == "执行中"
     assert p["plan_id"] == 1
     # 已完成任务按 summary 计数算 100%。
     assert jobs[2]["progress"]["pct"] == 100.0
     assert jobs[2]["progress"]["phase"] == "已完成"
+    # 已完成的 plan 任务：计划项全 pending 也不得显示 0%，计划本身已生成即 100%。
+    assert jobs[3]["progress"]["pct"] == 100.0
+    assert jobs[3]["progress"]["total"] == 2
+    assert jobs[3]["progress"]["phase"] == "已完成"
+    # 进行中的 plan 任务（计划尚未生成）：总数未知，pct 为 None。
+    assert jobs[4]["progress"]["total"] is None
+    assert jobs[4]["progress"]["pct"] is None
+    assert jobs[4]["progress"]["phase"] == "计划中"
 
 
 def test_api_job_progress_detail_failed_items(client):
@@ -272,8 +303,9 @@ def test_api_running_includes_job_and_heartbeat(client):
     r = c.get("/api/jobs/running")
     assert r.status_code == 200, r.text
     d = r.json()
-    assert [j["id"] for j in d["jobs"]] == [1]  # 只有 running 的 job
-    assert d["jobs"][0]["progress"]["total"] == 5
+    assert [j["id"] for j in d["jobs"]] == [4, 1]  # 只有 running 的 job（倒序）
+    assert d["jobs"][1]["progress"]["total"] == 5  # job 1（apply）
+    assert d["jobs"][0]["progress"]["total"] is None  # job 4（plan 生成中）
     scripts = {t["task_id"]: t for t in d["scripts"]}
     assert "vlm-reclassify" in scripts
     assert scripts["vlm-reclassify"]["done"] == 30

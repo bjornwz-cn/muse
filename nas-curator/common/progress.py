@@ -88,7 +88,9 @@ def compute_progress(total, done, skipped=0, failed=0,
 
     规则：
     - pending = total - done - skipped - failed（总数已知时；下限 0）。
-    - pct：总数已知时 done/total；总数 0 且已结束时 100，否则 None。
+    - pct：已解决（done + skipped）/ total；skipped 是已决定的不做项，
+      不是待处理，所以计入进度；failed 是问题，不计入。总数 0 且已结束时
+      pct 按 100 计，否则 None。
     - 速率：已耗时 >= 60 秒且 done > 0 时才算（项/分钟）；否则 None。
     - ETA：剩余 pending / 速率；无速率或 pending 为 0 时 None。
     """
@@ -106,7 +108,7 @@ def compute_progress(total, done, skipped=0, failed=0,
         pct = None
     else:
         pending = max(0, total - done - skipped - failed)
-        pct = round(100.0 * done / total, 1) if total > 0 else (
+        pct = round(100.0 * (done + skipped) / total, 1) if total > 0 else (
             100.0 if finish is not None else 0.0)
     rate_per_min = None
     if elapsed_s is not None and elapsed_s >= 60 and done > 0:

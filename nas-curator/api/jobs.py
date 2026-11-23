@@ -299,10 +299,25 @@ def _job_progress(conn, job: dict) -> dict:
         plan = DB.get_plan(conn, plan_id)
         counts = _plan_counts(conn, plan_id)
         total = sum(counts.values())
-        p = PROG.compute_progress(total, counts["done"], counts["skipped"],
-                                  counts["failed"], started, finished)
-        p["phase"] = _phase_for(job.get("kind"),
-                                (plan or {}).get("status"), status)
+        kind = job.get("kind")
+        if kind in ("plan", "rollback"):
+            # 计划/回滚任务：进度按任务本身算，不按 plan_items 状态。
+            # plan 任务的工作是生成计划本身：计划已生成即 100%，
+            # plan_items 的 pending 是“待执行”的下一阶段（apply 的事），
+            # 不能算成本任务未完成；否则已完成的计划任务会显示 0%。
+            # 回滚同理：回滚执行中的 plan_items 状态反映的是 apply 的旧结局，
+            # 不是回滚进度。
+            if status == "done":
+                p = PROG.compute_progress(total, total, 0, 0, started, finished)
+            elif status == "failed":
+                p = PROG.compute_progress(total, 0, 0, 0, started, finished)
+            else:  # running：计划尚未写入 / 回滚尚未结束，总数未知
+                p = PROG.compute_progress(None, 0, 0, 0, started, None)
+        else:
+            # apply：按 plan_items 状态计执行进度。
+            p = PROG.compute_progress(total, counts["done"], counts["skipped"],
+                                      counts["failed"], started, finished)
+        p["phase"] = _phase_for(kind, (plan or {}).get("status"), status)
         p["plan_id"] = plan_id
         return p
     if status == "done":
