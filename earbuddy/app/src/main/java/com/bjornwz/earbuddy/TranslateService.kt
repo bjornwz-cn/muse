@@ -328,9 +328,7 @@ class TranslateService : Service() {
                 context = this,
                 appId = TranslateStore.txAppId(this).toIntOrNull() ?: 0,
                 secretId = TranslateStore.txSecretId(this),
-                credentialProvider = com.tencent.aai.auth.LocalCredentialProvider(
-                    TranslateStore.txSecretKey(this)
-                ),
+                secretKey = TranslateStore.txSecretKey(this),
                 engineModelType = TencentAsr.engineFor(effFrom),
                 onPartial = { p -> onPartialText(p) },
                 onFinal = { text -> onFinalText(text) },
