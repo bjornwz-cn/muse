@@ -7,6 +7,12 @@
 <div id="dash-error"></div>
 <div id="upgrade-banner" aria-live="polite"></div>
 
+<!-- 0.2.0：进行中任务（DB 任务 + 脚本心跳任务），一眼可见进度与 ETA。 -->
+<section aria-label="进行中任务">
+  <h2>进行中任务</h2>
+  <div id="running-body"><p class="loading">加载中…</p></div>
+</section>
+
 <section aria-label="三库">
   <div class="cards" id="library-cards"><p class="loading">加载中…</p></div>
 </section>
@@ -34,8 +40,8 @@
 <h2>最近任务</h2>
 <div class="table-wrap">
   <table>
-    <thead><tr><th>任务</th><th>类型</th><th>状态</th><th>开始</th><th>结束</th></tr></thead>
-    <tbody id="jobs-body"><tr><td colspan="5" class="muted">加载中…</td></tr></tbody>
+    <thead><tr><th>任务</th><th>类型</th><th>状态</th><th>进度</th><th>开始</th><th>结束</th></tr></thead>
+    <tbody id="jobs-body"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
   </table>
 </div>
 {% endblock %}
@@ -126,6 +132,41 @@
     }
   }
 
+  /* 0.2.0：进行中任务（DB job + 脚本心跳/推导），每 5 秒刷新一次。 */
+  function renderRunning(d) {
+    var box = document.getElementById('running-body');
+    if (!box) return;
+    var cards = [];
+    (d.jobs || []).forEach(function (j) {
+      var p = j.progress || {};
+      cards.push('<div class="card"><h3>任务 #' + C.esc(j.id) + ' · ' + C.esc(j.kind) + '</h3>' +
+        '<div>' + C.statusTag(j.status) + ' <span class="meta">' + C.esc(p.phase || '') + '</span></div>' +
+        '<div style="margin-top:8px">' + C.progressBar(p) + '</div>' +
+        '<div class="meta">开始 ' + C.fmtTime(j.started_at) + ' · 已耗时 ' + C.fmtDuration(p.elapsed_s) + '</div></div>');
+    });
+    (d.scripts || []).forEach(function (t) {
+      var p = t;
+      var stale = t.stale ? ' <span class="prog-stale">已失联（心跳超过 10 分钟未更新，可能已中断）</span>' : '';
+      var src = t.source === 'derived' ? ' <span class="meta">（进度由脚本日志推导）</span>' : '';
+      cards.push('<div class="card"><h3>' + C.esc(t.label || t.task_id) + '</h3>' +
+        '<div>' + C.statusTag(t.status) + ' <span class="meta">' + C.esc(t.phase || '') + '</span>' + stale + src + '</div>' +
+        '<div style="margin-top:8px">' + C.progressBar(p) + '</div>' +
+        '<div class="meta">开始 ' + C.fmtTime(t.started_at) + ' · 更新于 ' + C.fmtTime(t.updated_at) +
+        ' · 速率 ' + C.fmtRate(p.rate_per_min) + '</div></div>');
+    });
+    box.innerHTML = cards.length ? '<div class="cards">' + cards.join('') + '</div>'
+      : '<p class="muted">暂无进行中任务</p>';
+  }
+
+  async function loadRunning() {
+    try {
+      var d = await C.api('/api/jobs/running');
+      renderRunning(d);
+    } catch (e) {
+      /* 取不到时保持上一次内容，不阻塞总览页 */
+    }
+  }
+
   async function load() {
     try {
       var d = await C.api('/api/dashboard');
@@ -145,10 +186,11 @@
       document.getElementById('stat-dup-count').textContent = C.fmtNum(dup.count) + ' 个重复文件';
       var rows = (d.jobs_recent || []).map(function (j) {
         return '<tr><td class="path">' + C.esc(j.id) + '</td><td>' + C.esc(j.kind) + '</td>' +
-          '<td>' + C.statusTag(j.status) + '</td><td class="nowrap">' + C.fmtTime(j.started_at) + '</td>' +
+          '<td>' + C.statusTag(j.status) + '</td><td>' + C.progressBar(j.progress) + '</td>' +
+          '<td class="nowrap">' + C.fmtTime(j.started_at) + '</td>' +
           '<td class="nowrap">' + C.fmtTime(j.finished_at) + '</td></tr>';
       }).join('');
-      document.getElementById('jobs-body').innerHTML = rows || '<tr><td colspan="5" class="muted">暂无任务</td></tr>';
+      document.getElementById('jobs-body').innerHTML = rows || '<tr><td colspan="6" class="muted">暂无任务</td></tr>';
     } catch (e) {
       C.showError(document.getElementById('dash-error'), e);
       document.getElementById('library-cards').innerHTML = '';
@@ -156,6 +198,8 @@
   }
   load();
   loadUpgrade();
+  loadRunning();
+  setInterval(loadRunning, 5000);  /* 0.2.0：进行中任务每 5 秒刷新 */
 })();
 </script>
 {% endblock %}

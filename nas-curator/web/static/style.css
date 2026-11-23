@@ -102,6 +102,17 @@ tbody tr.clickable { cursor: pointer; }
 .conf-num { font-size: 12px; white-space: nowrap; }
 .evidence { color: var(--muted); font-size: 13px; word-break: break-all; }
 
+/* 任务进度（0.2.0） */
+.prog { display: inline-flex; flex-direction: column; gap: 2px; min-width: 200px; }
+.prog-bar { display: block; height: 8px; background: #e5e7eb; border-radius: 4px; overflow: hidden; }
+.prog-fill { display: block; height: 100%; background: var(--ok); }
+.prog-fill.unknown { width: 100%; background: repeating-linear-gradient(45deg, var(--warn), var(--warn) 6px, #f3f4f6 6px, #f3f4f6 12px); }
+.prog-text { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.prog-stale { color: var(--bad); font-weight: 700; }
+.prog-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px 16px; margin: 8px 0; }
+.prog-grid .stat b { display: block; font-size: 18px; }
+.prog-grid .stat span { color: var(--muted); font-size: 12px; }
+
 /* 表单 */
 form .field { margin-bottom: 12px; }
 label { display: block; font-weight: 600; margin-bottom: 4px; font-size: 14px; }

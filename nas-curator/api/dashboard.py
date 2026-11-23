@@ -7,6 +7,7 @@ from datetime import date
 from fastapi import APIRouter, Depends
 
 from .deps import get_db, get_settings
+from .jobs import _job_dict, _job_progress  # 0.2.0：最近任务带进度摘要
 
 from common.version import read_local_version
 
@@ -59,12 +60,14 @@ def dashboard(conn=Depends(get_db)):
     today_new = conn.execute(
         "SELECT COUNT(*) AS n FROM files WHERE substr(created_at,1,10)=?",
         (today,)).fetchone()["n"]
-    jobs_recent = [
-        {"id": r["id"], "kind": r["kind"], "status": r["status"],
-         "started_at": r["started_at"], "finished_at": r["finished_at"]}
-        for r in conn.execute(
-            "SELECT * FROM jobs ORDER BY id DESC LIMIT 5")
-    ]
+    jobs_recent = []
+    for r in conn.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT 5"):
+        job = _job_dict(r)
+        job["progress"] = _job_progress(conn, job)
+        jobs_recent.append({
+            "id": job["id"], "kind": job["kind"], "status": job["status"],
+            "started_at": job["started_at"], "finished_at": job["finished_at"],
+            "progress": job["progress"]})
     dup_row = conn.execute(
         "SELECT COUNT(*) AS n FROM review_queue"
         " WHERE kind='dup' AND status='pending'").fetchone()

@@ -29,6 +29,46 @@
     return Number(n).toLocaleString('zh-CN');
   }
 
+  /* ---------- 任务进度（0.2.0） ---------- */
+  function fmtDuration(sec) {
+    if (sec == null || isNaN(sec) || sec < 0) return '—';
+    sec = Math.round(sec);
+    if (sec < 60) return sec + '秒';
+    var m = Math.floor(sec / 60);
+    if (m < 60) return m + '分钟';
+    var h = Math.floor(m / 60);
+    return h + '小时' + (m % 60 ? (m % 60) + '分' : '');
+  }
+
+  function fmtRate(n) {
+    if (n == null || isNaN(n) || n <= 0) return '—';
+    return (n >= 100 ? Math.round(n) : (Math.round(n * 10) / 10)) + ' 项/分钟';
+  }
+
+  /* 进度条 + 计数 + ETA：p 为后端 progress 摘要；总数未知时只显示
+     已完成数与“—”，绝不编造百分比与 ETA。 */
+  function progressBar(p) {
+    if (!p) return '<span class="muted">—</span>';
+    var total = p.total, done = p.done || 0;
+    var pct = p.pct;
+    var bar = (pct == null)
+      ? '<span class="prog-bar"><span class="prog-fill unknown"></span></span>'
+      : '<span class="prog-bar"><span class="prog-fill" style="width:' +
+        Math.max(0, Math.min(100, pct)) + '%"></span></span>';
+    var num = (total == null)
+      ? ('已完成 ' + fmtNum(done))
+      : (fmtNum(done) + ' / ' + fmtNum(total));
+    var extra = [];
+    if (p.pending != null && p.pending > 0) extra.push('待处理 ' + fmtNum(p.pending));
+    if (p.skipped) extra.push('跳过 ' + fmtNum(p.skipped));
+    if (p.failed) extra.push('问题 ' + fmtNum(p.failed));
+    var eta = 'ETA ' + fmtDuration(p.eta_seconds);
+    return '<span class="prog">' + bar + '<span class="prog-text">' + esc(num) +
+      (pct == null ? '' : ' · ' + pct + '%') +
+      (extra.length ? ' · ' + extra.join(' · ') : '') +
+      ' · ' + eta + '</span></span>';
+  }
+
   /* ---------- fetch 封装 ---------- */
   async function api(path, opts) {
     opts = opts || {};
@@ -176,6 +216,7 @@
   /* 导出给各页内联脚本用 */
   window.Curator = {
     api: api, esc: esc, fmtBytes: fmtBytes, fmtTime: fmtTime, fmtNum: fmtNum,
+    fmtDuration: fmtDuration, fmtRate: fmtRate, progressBar: progressBar,
     toast: toast, showError: showError, confBar: confBar, kindTag: kindTag,
     statusTag: statusTag, refreshReviewBadge: refreshReviewBadge,
     bindSelectAll: bindSelectAll, selectedValues: selectedValues, poll: poll

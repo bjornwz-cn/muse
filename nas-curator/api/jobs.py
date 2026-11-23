@@ -25,7 +25,7 @@ from pydantic import BaseModel
 
 import curator as CUR
 from common import db as DB
-from common import guard
+from common import guard, progress as PROG
 from .deps import get_db, get_db_path, get_settings, load_libraries
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
@@ -254,6 +254,121 @@ def _job_dict(row) -> dict:
     return d
 
 
+# ---------------------------------------------------------------- 进度（0.2.0）
+
+def _plan_counts(conn, plan_id: int) -> dict:
+    """plan_items 按状态计数；未知状态一律算 pending。"""
+    counts = {"done": 0, "pending": 0, "skipped": 0, "failed": 0}
+    for r in conn.execute(
+            "SELECT status, COUNT(*) AS n FROM plan_items"
+            " WHERE plan_id=? GROUP BY status", (plan_id,)):
+        st = (r["status"] or "pending").lower()
+        counts[st if st in counts else "pending"] += int(r["n"])
+    return counts
+
+
+def _phase_for(job_kind, plan_status, job_status) -> str:
+    """当前阶段（中文）：按 plan 状态优先，其次按任务类型。"""
+    if job_status == "done":
+        return "已完成"
+    if job_status == "failed":
+        return "失败"
+    if plan_status == "applying":
+        return "执行中"
+    if plan_status == "done":
+        return "已完成"
+    return {"plan": "计划中", "apply": "执行中",
+            "rollback": "回滚中"}.get(job_kind or "", "进行中")
+
+
+def _job_progress(conn, job: dict) -> dict:
+    """一个 DB 任务的进度摘要（数字全部来自 plan_items 真实计数）。
+
+    - 有 plan：按 plan_items 状态计数；plan 扫描中途（plan_items 尚未
+      写入）时 total 为 0，pct 按 0 计、phase 显示计划中——总数未知时
+      不编造。
+    - 无 plan 且已结束：按 job summary 的计数算 100%（done）或失败。
+    - 无 plan 且进行中：总数未知（total/pct/ETA 均为 None，前端显示 —）。
+    """
+    summary = job.get("summary") or {}
+    plan_id = summary.get("plan_id") if isinstance(summary, dict) else None
+    started = job.get("started_at")
+    finished = job.get("finished_at")
+    status = job.get("status")
+    if plan_id:
+        plan = DB.get_plan(conn, plan_id)
+        counts = _plan_counts(conn, plan_id)
+        total = sum(counts.values())
+        p = PROG.compute_progress(total, counts["done"], counts["skipped"],
+                                  counts["failed"], started, finished)
+        p["phase"] = _phase_for(job.get("kind"),
+                                (plan or {}).get("status"), status)
+        p["plan_id"] = plan_id
+        return p
+    if status == "done":
+        total = 0
+        if isinstance(summary, dict):
+            total = int(summary.get("move", 0) or 0) \
+                + int(summary.get("review", 0) or 0) \
+                + int(summary.get("moved", 0) or 0)
+        p = PROG.compute_progress(total, total, 0, 0, started, finished)
+        p["phase"] = "已完成"
+        p["plan_id"] = None
+        return p
+    if status == "failed":
+        p = PROG.compute_progress(0, 0, 0, 0, started, finished)
+        p["phase"] = "失败"
+        p["plan_id"] = None
+        return p
+    p = PROG.compute_progress(None, 0, 0, 0, started, None)
+    p["phase"] = _phase_for(job.get("kind"), None, status)
+    p["plan_id"] = None
+    return p
+
+
+def _script_tasks() -> list:
+    """脚本任务（心跳 + 年份重分类兜底推导），按 updated_at 倒序。
+
+    心跳文件优先；derived 的年份任务在同 task_id 已有心跳时不再重复列出
+    （同一任务只显示一个来源，心跳为准）。
+    """
+    data_dir = os.path.dirname(get_db_path())
+    out = PROG.read_heartbeats()
+    seen = {t.get("task_id") for t in out}
+    derived = PROG.derive_year_progress(data_dir)
+    if derived is not None and derived.get("task_id") not in seen:
+        out.append(derived)
+    out.sort(key=lambda r: r.get("updated_at") or "", reverse=True)
+    return out
+
+
+@router.get("/running")
+def running_tasks(conn=Depends(get_db)):
+    """进行中任务（总览页用）：DB 侧 running 的 job + 脚本任务。
+
+    脚本任务只含 running/stale，以及 1 小时内刚结束的 done（让用户看到
+    刚跑完的任务）；更早结束的不再列出。
+    """
+    import time as _time
+    jobs = []
+    for r in conn.execute(
+            "SELECT * FROM jobs WHERE status='running' ORDER BY id DESC"):
+        job = _job_dict(r)
+        job["progress"] = _job_progress(conn, job)
+        jobs.append(job)
+    scripts = []
+    now_ts = _time.time()
+    for t in _script_tasks():
+        if t.get("status") == "running" or t.get("stale"):
+            scripts.append(t)
+        elif t.get("status") == "done":
+            upd = PROG.parse_ts(t.get("updated_at"))
+            if upd is not None and (now_ts - upd.timestamp()) <= 3600:
+                scripts.append(t)
+    return {"jobs": jobs, "scripts": scripts}
+
+
+
 @router.post("")
 def create_job(body: CreateJobBody, conn=Depends(get_db)):
     root = _resolve_root(body)
@@ -274,8 +389,12 @@ def create_job(body: CreateJobBody, conn=Depends(get_db)):
 
 @router.get("")
 def list_jobs(conn=Depends(get_db)):
-    return [_job_dict(r) for r in conn.execute(
-        "SELECT * FROM jobs ORDER BY id DESC LIMIT 20")]
+    out = []
+    for r in conn.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT 20"):
+        job = _job_dict(r)
+        job["progress"] = _job_progress(conn, job)
+        out.append(job)
+    return out
 
 
 @router.get("/{job_id}")
@@ -284,6 +403,7 @@ def get_job(job_id: int, limit: int = 200, offset: int = 0, conn=Depends(get_db)
     if row is None:
         raise HTTPException(status_code=404, detail=f"任务 #{job_id} 不存在")
     job = _job_dict(row)
+    job["progress"] = _job_progress(conn, job)
     out = {"job": job}
     summary = job.get("summary") or {}
     plan_id = summary.get("plan_id") if isinstance(summary, dict) else None
@@ -296,6 +416,29 @@ def get_job(job_id: int, limit: int = 200, offset: int = 0, conn=Depends(get_db)
         out["plan_items"] = out["items"]
         out["plan_items_total"] = len(items)
     return out
+
+
+@router.get("/{job_id}/progress")
+def get_job_progress(job_id: int, conn=Depends(get_db)):
+    """任务进度详情：计数 + 百分比 + 速率 + ETA + 问题清单。"""
+    row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"任务 #{job_id} 不存在")
+    job = _job_dict(row)
+    progress = _job_progress(conn, job)
+    failed_items = []
+    plan_id = progress.get("plan_id")
+    if plan_id:
+        failed_items = [
+            {"id": r["id"], "src_path": r["src_path"], "dst_path": r["dst_path"],
+             "category": r["category"], "reason": r["reason"]}
+            for r in conn.execute(
+                "SELECT id, src_path, dst_path, category, reason FROM plan_items"
+                " WHERE plan_id=? AND status='failed' ORDER BY id LIMIT 50",
+                (plan_id,))]
+    return {"job_id": job_id, "job": job, "progress": progress,
+            "failed_items": failed_items,
+            "failed_total": progress.get("failed", 0)}
 
 
 @router.post("/{plan_id}/apply")

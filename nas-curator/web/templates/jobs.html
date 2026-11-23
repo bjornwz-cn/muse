@@ -40,6 +40,11 @@
   <div class="card"><div id="job-status-body">—</div></div>
 </section>
 
+<section id="progress-section" hidden>
+  <h2>进度详情</h2>
+  <div class="card"><div id="progress-body">—</div></div>
+</section>
+
 <section id="plan-section" hidden>
   <h2>计划明细</h2>
   <p class="muted" id="plan-summary"></p>
@@ -67,8 +72,8 @@
 <h2>任务历史</h2>
 <div class="table-wrap">
   <table>
-    <thead><tr><th>任务</th><th>类型</th><th>状态</th><th>开始</th><th>结束</th><th></th></tr></thead>
-    <tbody id="jobs-body"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
+    <thead><tr><th>任务</th><th>类型</th><th>状态</th><th>进度</th><th>开始</th><th>结束</th><th></th></tr></thead>
+    <tbody id="jobs-body"><tr><td colspan="7" class="muted">加载中…</td></tr></tbody>
   </table>
 </div>
 {% endblock %}
@@ -77,19 +82,54 @@
 (function () {
   var C = window.Curator;
   var currentJobId = null, currentPlanId = null, stopPoll = null;
+  var historyTimer = null;
 
   async function loadHistory() {
     try {
       var jobs = await C.api('/api/jobs');
       document.getElementById('jobs-body').innerHTML = jobs.length ? jobs.map(function (j) {
         return '<tr><td class="path">' + C.esc(j.id) + '</td><td>' + C.esc(j.kind) + '</td>' +
-          '<td>' + C.statusTag(j.status) + '</td><td class="nowrap">' + C.fmtTime(j.started_at) + '</td>' +
+          '<td>' + C.statusTag(j.status) + '</td><td>' + C.progressBar(j.progress) + '</td>' +
+          '<td class="nowrap">' + C.fmtTime(j.started_at) + '</td>' +
           '<td class="nowrap">' + C.fmtTime(j.finished_at) + '</td>' +
           '<td><button class="btn ghost small btn-view-job" data-id="' + C.esc(j.id) + '" type="button">查看</button></td></tr>';
-      }).join('') : '<tr><td colspan="6" class="muted">暂无任务</td></tr>';
+      }).join('') : '<tr><td colspan="7" class="muted">暂无任务</td></tr>';
+      /* 0.2.0：有任务在跑时每 5 秒刷新一次历史表，跑完即停。 */
+      var anyRunning = jobs.some(function (j) { return j.status === 'running'; });
+      if (historyTimer) { clearTimeout(historyTimer); historyTimer = null; }
+      if (anyRunning) {
+        historyTimer = setTimeout(loadHistory, 5000);
+      }
     } catch (e) {
-      document.getElementById('jobs-body').innerHTML = '<tr><td colspan="6" class="error">加载失败：' + C.esc(e.message) + '</td></tr>';
+      document.getElementById('jobs-body').innerHTML = '<tr><td colspan="7" class="error">加载失败：' + C.esc(e.message) + '</td></tr>';
     }
+  }
+
+  /* 0.2.0：进度详情面板（阶段/计数/速率/ETA/问题清单）。 */
+  function renderProgress(pdata) {
+    var p = (pdata && pdata.progress) || {};
+    var box = document.getElementById('progress-section');
+    box.hidden = false;
+    var rows = '<div class="prog-grid">' +
+      '<div class="stat"><b>' + C.esc(p.phase || '—') + '</b><span>当前阶段</span></div>' +
+      '<div class="stat"><b>' + C.fmtNum(p.done) + ' / ' + C.fmtNum(p.total) + '</b><span>已完成 / 总数</span></div>' +
+      '<div class="stat"><b>' + C.fmtNum(p.pending) + '</b><span>待处理</span></div>' +
+      '<div class="stat"><b>' + C.fmtNum(p.skipped) + '</b><span>跳过</span></div>' +
+      '<div class="stat"><b>' + C.fmtNum(p.failed) + '</b><span>问题</span></div>' +
+      '<div class="stat"><b>' + C.fmtRate(p.rate_per_min) + '</b><span>处理速率</span></div>' +
+      '<div class="stat"><b>' + C.fmtDuration(p.eta_seconds) + '</b><span>预估剩余</span></div>' +
+      '<div class="stat"><b>' + C.fmtDuration(p.elapsed_s) + '</b><span>已耗时</span></div></div>' +
+      C.progressBar(p);
+    var failed = (pdata && pdata.failed_items) || [];
+    if (failed.length) {
+      rows += '<h3>问题清单（' + C.fmtNum(pdata.failed_total) + ' 项，最多显示 50 项）</h3>' +
+        '<div class="table-wrap"><table><thead><tr><th>来源</th><th>分类</th><th>原因</th></tr></thead><tbody>' +
+        failed.map(function (it) {
+          return '<tr><td class="path">' + C.esc(it.src_path || '') + '</td><td>' +
+            C.esc(it.category || '—') + '</td><td>' + C.esc(it.reason || '—') + '</td></tr>';
+        }).join('') + '</tbody></table></div>';
+    }
+    document.getElementById('progress-body').innerHTML = rows;
   }
 
   function renderPlan(data) {
@@ -123,6 +163,11 @@
     stopPoll = C.poll(async function () {
       var data = await C.api('/api/jobs/' + encodeURIComponent(jobId));
       var job = renderPlan(data);
+      /* 0.2.0：每轮同时取进度详情（失败不阻塞主轮询）。 */
+      try {
+        var pdata = await C.api('/api/jobs/' + encodeURIComponent(jobId) + '/progress');
+        renderProgress(pdata);
+      } catch (e) { /* 进度取不到时面板保持上一次内容 */ }
       var st = (job.status || '').toLowerCase();
       var finished = ['done', 'failed', 'rolled_back'].indexOf(st) >= 0;
       if (finished) {
@@ -154,6 +199,7 @@
       var res = await C.api('/api/jobs', { method: 'POST', body: body });
       document.getElementById('plan-section').hidden = true;
       document.getElementById('report-section').hidden = true;
+      document.getElementById('progress-section').hidden = true;
       C.toast('任务已发起：' + res.job_id);
       watchJob(res.job_id);
     } catch (e) {
