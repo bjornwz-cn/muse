@@ -234,7 +234,9 @@ def derive_year_progress(data_dir=None, now=None):
     """从 year_siglip 的日志与结果文件推导进度（source='derived'）。
 
     依据（全部是脚本自己产出的真实产物）：
-    - /data/year_siglip_results.jsonl 行数 = 已分类数（逐行刷盘）。
+    - /data/year_siglip_results.jsonl 行数 − 日志里 "already classified" 的
+      已有行数 = 本轮已分类数（逐行刷盘；直接数行数会把上一轮断点续跑的
+      500 行也算进来，百分比会破百）。
     - /data/year_siglip.log 最后一行 PROG d/t secs = 脚本自报的
       已做/总数/已耗时（每 200 项打印一次）；总数取不到时用
       "to classify (SigLIP): N" 那行。
@@ -271,18 +273,31 @@ def derive_year_progress(data_dir=None, now=None):
         return rec
     if not os.path.exists(results_path) and not os.path.exists(log_path):
         return None
-    done = 0
-    if os.path.exists(results_path):
-        with open(results_path, "rb") as f:
-            done = sum(1 for _ in f)
-    total = None
-    prog_done = prog_elapsed = None
+    # JSONL 可能已有上一轮断点续跑的行（日志 "already classified ...: N"），
+    # 本轮新增 = 总行数 − 已有行数；总数是本轮 todo（PROG 的分母），
+    # 否则 done 会超过 total、百分比破百。
+    already = 0
+    reused = 0
+    log_text = ""
     if os.path.exists(log_path):
         try:
             with open(log_path, encoding="utf-8", errors="replace") as f:
                 log_text = f.read()
         except Exception:
             log_text = ""
+        m = re.search(r"already classified in \S+: (\d+)", log_text)
+        if m:
+            already = int(m.group(1))
+        m = re.search(r"reuse existing classification: (\d+)", log_text)
+        if m:
+            reused = int(m.group(1))
+    done = 0
+    if os.path.exists(results_path):
+        with open(results_path, "rb") as f:
+            done = max(0, sum(1 for _ in f) - already)
+    total = None
+    prog_done = prog_elapsed = None
+    if log_text:
         for m in _PROG_LINE_RE.finditer(log_text):
             prog_done, total, prog_elapsed = int(m.group(1)), int(m.group(2)), int(m.group(3))
         if total is None:
@@ -301,7 +316,8 @@ def derive_year_progress(data_dir=None, now=None):
         "kind": "year-reclassify", "phase": "siglip", "status": "running",
         "source": "derived",
         "started_at": None, "updated_at": updated,
-        "errors": [], "extra": {},
+        "errors": [], "extra": {"already_classified": already,
+                                "reused_existing": reused},
         "stale": False,
     }
     # 速率与 ETA：用脚本自报的 PROG 已耗时（比 started_at 更准，

@@ -178,6 +178,24 @@ def test_derive_year_progress_done_when_summary_exists(tmp_path):
     assert rec["extra"]["unclassified"] == 120
 
 
+def test_derive_year_progress_subtracts_preexisting_lines(tmp_path):
+    # 真实情况（2026-11-23 实测）：JSONL 在本轮开始前已有 500 行（上一轮
+    # 断点续跑），直接数行数会把 done 算多 500、百分比破百。
+    d = tmp_path
+    _write_year_fixtures(d, n_results=9100, total=14315, elapsed=3829)
+    log = (d / "year_siglip.log").read_text(encoding="utf-8")
+    log = log.replace("already classified in /data/year_siglip_results.jsonl: 0",
+                      "already classified in /data/year_siglip_results.jsonl: 500")
+    log = log.replace("reuse existing classification: 2528",
+                      "reuse existing classification: 1401")
+    (d / "year_siglip.log").write_text(log, encoding="utf-8")
+    rec = PROG.derive_year_progress(str(d), now="2026-11-23T15:21:00")
+    assert rec["total"] == 14315 and rec["done"] == 8600  # 9100 − 500
+    assert rec["pct"] == pytest.approx(60.1, abs=0.1)
+    assert rec["extra"]["already_classified"] == 500
+    assert rec["extra"]["reused_existing"] == 1401
+
+
 # ---------------------------------------------------------------- API
 
 @pytest.fixture(scope="module")
