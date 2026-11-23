@@ -11,6 +11,7 @@ import okhttp3.WebSocketListener
 import okio.ByteString
 import okio.ByteString.Companion.toByteString
 import org.json.JSONObject
+import java.util.Collections
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
@@ -25,6 +26,14 @@ import java.util.concurrent.TimeUnit
  * 连接说明：一句话识别按协议就是一请求一连接（服务端回完结果即关闭），
  * 无法像流式那样复用同一条 WebSocket；本类复用同一个 OkHttpClient，
  * 另加失败重试 1 次（瞬时抖动不丢整句）与 12 秒单次看门狗。
+ *
+ * 失败原因（v0.9.2）：回调改为 (text, errorReason)——text 为空时 errorReason
+ * 一定给出人类可读的原因（连接失败/服务端拒绝码/12 秒无响应/空结果），
+ * 调用方据此记诊断日志并在界面上提示，不再静默出 0 行。
+ * 2026-11-23 实测教训：当天的失败全是看门狗超时（12 秒无结果帧、且无服务端
+ * 错误帧），旧代码把原因丢了，日志里只剩秃秃的 asr_error，无法定位是网络、
+ * 鉴权还是服务端问题——本版把 onFailure 的异常/HTTP 码、错误帧的 code/message、
+ * 看门狗触发时的连接/收帧状态全部记下来。
  */
 object VolcSegmentAsr {
 
@@ -41,13 +50,28 @@ object VolcSegmentAsr {
         .build()
     private val main = Handler(Looper.getMainLooper())
 
-    /** lang: "ja"/"ko"/"zh"/"en"（短码，内部转地区码）。cb 在主线程回调，失败返回 null。 */
-    fun transcribe(ctx: Context, apiKey: String, pcm: ByteArray, lang: String, cb: (String?) -> Unit) {
+    /** 进行中的连接：会话停止时 cancelAll() 立即掐断，避免停止后重试/报错还继续写日志。 */
+    private val activeSockets =
+        Collections.synchronizedSet(mutableSetOf<WebSocket>())
+
+    /** 掐断全部进行中的一句话识别请求（会话停止/销毁时调）。已在跑的回调会被丢弃，不再回写。 */
+    fun cancelAll() {
+        val copy = synchronized(activeSockets) { activeSockets.toList() }
+        activeSockets.clear()
+        copy.forEach { try { it.cancel() } catch (e: Exception) { } }
+    }
+
+    /**
+     * lang: "ja"/"ko"/"zh"/"en"（短码，内部转地区码）。
+     * cb 在主线程回调：成功时 (text, null)；失败时 (null, errorReason)，errorReason
+     * 为人类可读的原因（不含任何密钥），调用方应记日志并提示用户。
+     */
+    fun transcribe(ctx: Context, apiKey: String, pcm: ByteArray, lang: String, cb: (String?, String?) -> Unit) {
         transcribeAttempt(ctx, apiKey, pcm, lang, cb, attempt = 0)
     }
 
-    private fun transcribeAttempt(ctx: Context, apiKey: String, pcm: ByteArray, lang: String, cb: (String?) -> Unit, attempt: Int) {
-        if (pcm.isEmpty() || apiKey.isEmpty()) { cb(null); return }
+    private fun transcribeAttempt(ctx: Context, apiKey: String, pcm: ByteArray, lang: String, cb: (String?, String?) -> Unit, attempt: Int) {
+        if (pcm.isEmpty() || apiKey.isEmpty()) { cb(null, "音频为空或火山 Key 未填"); return }
         val langFull = when (lang) {
             "ja" -> "ja-JP"
             "ko" -> "ko-KR"
@@ -58,20 +82,29 @@ object VolcSegmentAsr {
         val resultText = StringBuilder()
         var done = false
         var sawErrorFrame = false
+        var errorCode = 0
+        var errorMsg = ""
+        var opened = false
+        var frames = 0
         var socket: WebSocket? = null
         lateinit var watchdog: Runnable
-        fun finish(text: String?) {
+        fun finish(text: String?, reason: String?) {
             if (done) return
             done = true
             main.removeCallbacks(watchdog)
+            socket?.let { activeSockets.remove(it) }
             try { socket?.cancel() } catch (e: Exception) { }
             val finalText = text?.ifBlank { null }
             if (finalText == null && attempt + 1 < MAX_ATTEMPTS && !sawErrorFrame) {
-                DiagLog.log(ctx, "asr_retry", mapOf("engine" to "volc_nostream", "lang" to lang, "attempt" to (attempt + 1)))
+                DiagLog.log(ctx, "asr_retry", mapOf(
+                    "engine" to "volc_nostream", "lang" to lang,
+                    "attempt" to (attempt + 1),
+                    "reason" to (reason ?: "无结果").take(160)
+                ))
                 transcribeAttempt(ctx, apiKey, pcm, lang, cb, attempt + 1)
                 return
             }
-            main.post { cb(finalText) }
+            main.post { cb(finalText, if (finalText == null) reason else null) }
         }
         val req = Request.Builder()
             .url(URL)
@@ -79,10 +112,16 @@ object VolcSegmentAsr {
             .header("X-Api-Resource-Id", RESOURCE_ID)
             .header("X-Api-Request-Id", UUID.randomUUID().toString())
             .build()
-        watchdog = Runnable { finish(resultText.toString()) }
+        watchdog = Runnable {
+            finish(
+                resultText.toString(),
+                "12 秒未收到识别结果（${if (opened) "已连接" else "未连上服务器"}，收到 $frames 帧）"
+            )
+        }
         main.postDelayed(watchdog, WATCHDOG_MS)
         socket = client.newWebSocket(req, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                opened = true
                 val payload = JSONObject().apply {
                     put("user", JSONObject().put("uid", "earbuddy"))
                     put("audio", JSONObject().apply {
@@ -121,7 +160,13 @@ object VolcSegmentAsr {
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
                 val raw = bytes.toByteArray()
-                if (isErrorFrame(raw)) sawErrorFrame = true
+                frames++
+                if (isErrorFrame(raw)) {
+                    sawErrorFrame = true
+                    val (code, msg) = parseErrorFrame(raw)
+                    errorCode = code
+                    errorMsg = msg
+                }
                 val text = parseFrame(raw) ?: return
                 if (text.isNotEmpty()) {
                     synchronized(resultText) { resultText.setLength(0); resultText.append(text) }
@@ -129,19 +174,58 @@ object VolcSegmentAsr {
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                finish(resultText.toString())
+                val r = when {
+                    resultText.isNotBlank() -> null
+                    sawErrorFrame -> "服务端拒绝 $errorCode${if (errorMsg.isNotEmpty()) "：$errorMsg" else ""}"
+                    else -> "服务端返回空结果（close $code${if (reason.isNotEmpty()) " $reason" else ""}）"
+                }
+                finish(resultText.toString(), r)
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                finish(resultText.toString())
+                val httpCode = response?.code
+                val detail = "${t.javaClass.simpleName}${t.message?.let { ": $it" } ?: ""}" +
+                    (if (httpCode != null) "（HTTP $httpCode）" else "")
+                val r = if (sawErrorFrame) {
+                    "服务端拒绝 $errorCode${if (errorMsg.isNotEmpty()) "：$errorMsg" else ""}"
+                } else {
+                    "连接失败：$detail"
+                }
+                finish(resultText.toString(), r)
             }
         })
+        socket?.let { activeSockets.add(it) }
     }
 
     /** 错误帧（type 0xF）：服务端明确拒绝（Key/参数问题），重试无意义。 */
     private fun isErrorFrame(data: ByteArray): Boolean {
         if (data.size < 4) return false
         return (data[1].toInt() shr 4 and 0x0F) == 0xF
+    }
+
+    /** 解析错误帧：返回 (code, message)，与 VolcAsr 流式同一格式（code + JSON error 字段）。 */
+    private fun parseErrorFrame(data: ByteArray): Pair<Int, String> {
+        try {
+            if (data.size < 4) return 0 to ""
+            val headerSize = (data[0].toInt() and 0x0F) * 4
+            val comp = data[2].toInt() and 0x0F
+            var off = headerSize
+            fun read32(): Int {
+                val v = ((data[off].toInt() and 0xFF) shl 24) or ((data[off + 1].toInt() and 0xFF) shl 16) or
+                    ((data[off + 2].toInt() and 0xFF) shl 8) or (data[off + 3].toInt() and 0xFF)
+                off += 4
+                return v
+            }
+            val code = read32()
+            val size = read32()
+            if (size <= 0 || off + size > data.size) return code to ""
+            var payload = data.copyOfRange(off, off + size)
+            if (comp == 1) payload = VolcProto.gunzip(payload)
+            val msg = try { JSONObject(String(payload, Charsets.UTF_8)).optString("error") } catch (e: Exception) { "" }
+            return code to msg
+        } catch (e: Exception) {
+            return 0 to ""
+        }
     }
 
     /** 解析一帧：返回 result.text（定稿全文）；错误帧/无文本返回 null。 */

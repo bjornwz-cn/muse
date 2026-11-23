@@ -11,8 +11,8 @@ android {
         applicationId = "com.bjornwz.earbuddy"
         minSdk = 26
         targetSdk = 36
-        versionCode = 47
-        versionName = "0.8.9"
+        versionCode = 50
+        versionName = "0.9.2"
     }
 
     buildTypes {

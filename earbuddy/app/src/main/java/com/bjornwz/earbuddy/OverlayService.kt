@@ -130,9 +130,12 @@ class OverlayService : Service() {
         val needConsent = TranslateStore.micSource(ctx) == "internal" &&
             !InternalCapture.isRunning() && !InternalCapture.hasProjection()
         if (needMicPerm || needConsent) {
+            // 借道翻译页拿权限/授权：会话起来后退回后台（background_start），
+            // 用户本来就在别的 App 里，不打扰。主界面点「开始翻译」不带这个标记，留在前台。
             startActivity(
                 Intent(ctx, TranslateActivity::class.java)
                     .putExtra("auto_start", true)
+                    .putExtra("background_start", true)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             )
         } else {

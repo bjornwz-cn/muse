@@ -21,12 +21,17 @@ import android.widget.Toast
 class TranslateActivity : Activity() {
 
     private lateinit var statusView: TextView
+    private lateinit var configView: TextView
+    private lateinit var liveView: TextView
+    private lateinit var errorView: TextView
     private lateinit var partialView: TextView
     private lateinit var listBox: LinearLayout
     private lateinit var scroll: ScrollView
     private lateinit var dirValue: TextView
     private lateinit var providerValue: TextView
+    private lateinit var engineKeyValue: TextView
     private lateinit var startBtn: TextView
+    private lateinit var minimizeBtn: TextView
     private lateinit var silenceValue: TextView
     private lateinit var levelBar: android.widget.ProgressBar
 
@@ -34,12 +39,25 @@ class TranslateActivity : Activity() {
     private var to = "en"
     /** 本地镜像：会话实际在 TranslateService 里跑，这里只跟随其状态刷新 UI。 */
     private var running = false
-    private var autoStarted = false
+    /** 悬浮按钮借道本页启动（缺权限/未授权时）：会话起来后退回后台，不打扰原 App。 */
+    private var backgroundStart = false
     private val entries = mutableListOf<TranslateStore.Entry>()
     private val handler = Handler(Looper.getMainLooper())
+    private var liveTicking = false
+    private val liveTicker = object : Runnable {
+        override fun run() {
+            if (!running) { liveTicking = false; return }
+            refreshLiveLine()
+            handler.postDelayed(this, 1000)
+        }
+    }
 
     private fun volcMode() = TranslateStore.asrEngine(this) == "volc" &&
         TranslateStore.asrKey(this, "volc").isNotEmpty()
+
+    /** 腾讯云实时 ASR 已选且三值（AppId/SecretId/SecretKey）都已填。 */
+    private fun txMode() = TranslateStore.asrEngine(this) == "tx" &&
+        TranslateStore.txConfigured(this)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -51,8 +69,21 @@ class TranslateActivity : Activity() {
         val head = Ui.card(this)
         head.addView(Ui.title(this, "🎙 实时翻译", 20f))
         head.addView(Ui.body(this, "边说边翻 · 字幕同步到悬浮条 · 翻译中通知只存不播", 12.5f, Ui.SUBTEXT))
+        // v0.9.2：开始前就显示实际生效的配置（所见即所得）——旧版只显示「选了什么引擎」，
+        // 选了腾讯但没填 Key 时服务会悄悄改走火山/离线，用户以为在用腾讯。
+        configView = Ui.body(this, "", 13.5f, Ui.SUBTEXT)
+        head.addView(configView)
         statusView = Ui.body(this, "未开始", 15f)
         head.addView(statusView)
+        // v0.9.2：进行中实时行（方向/引擎/已耗时/已出句数），每秒刷新。
+        liveView = Ui.body(this, "", 13.5f)
+        liveView.visibility = android.view.View.GONE
+        head.addView(liveView)
+        // v0.9.2：识别/引擎错误红字显示（旧版只记日志，界面静默出 0 行）。
+        errorView = Ui.body(this, "", 13.5f)
+        errorView.setTextColor(android.graphics.Color.parseColor("#B00020"))
+        errorView.visibility = android.view.View.GONE
+        head.addView(errorView)
         head.addView(Ui.body(this, "收音电平", 12f, Ui.SUBTEXT))
         levelBar = android.widget.ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
             max = 100
@@ -64,11 +95,19 @@ class TranslateActivity : Activity() {
         head.addView(levelBar)
         root.addView(head)
 
-        // ——— 主操作：开始/停止 + 记录入口（脱离设置卡，突出显示）———
+        // ——— 主操作：开始/停止 + 最小化 + 记录入口（脱离设置卡，突出显示）———
         startBtn = Ui.button(this, "开始翻译", primary = true) { if (running) stopSession() else startSession() }
         startBtn.textSize = 17f
         startBtn.setPadding(0, Ui.dp(this, 10), 0, Ui.dp(this, 10))
         root.addView(startBtn)
+        // v0.9.2：最小化是用户主动点的才切后台（旧版点开始就自动 moveTaskToBack，
+        // App 缩到后台、看起来像闪退）。点通知可回到本页。
+        minimizeBtn = Ui.button(this, "⬇ 最小化到后台（翻译继续，字幕在屏幕下方）") {
+            Toast.makeText(this, "翻译在后台继续，点通知可回到这里", Toast.LENGTH_SHORT).show()
+            moveTaskToBack(true)
+        }
+        minimizeBtn.visibility = android.view.View.GONE
+        root.addView(minimizeBtn)
         root.addView(Ui.button(this, "📜 翻译记录") {
             startActivity(Intent(this, RecordsActivity::class.java))
         })
@@ -82,43 +121,74 @@ class TranslateActivity : Activity() {
         subs.addView(partialView)
         root.addView(subs)
 
-        // ——— 设置（分组行式）———
-        val settings = Ui.card(this)
-        val secTrans = Ui.sectionTitle(this, "翻译")
-        (secTrans.layoutParams as LinearLayout.LayoutParams).topMargin = Ui.dp(this, 2)
-        settings.addView(secTrans)
-        val dirRow = Ui.settingRow(this, "方向", dirLabel()) { toggleDirection() }
+        // ——— 设置：按功能分四组，每组一张卡；密钥收进二级入口，不全摊在主页面 ———
+        val isVosk = TranslateStore.asrEngine(this) == "vosk"
+
+        // ① 识别：引擎、引擎密钥、语言方向、收音来源；精度与模型导入只对离线引擎有意义
+        val asrCard = Ui.card(this)
+        asrCard.addView(Ui.title(this, "识别", 18f))
+        val engRow = Ui.settingRow(this, "识别引擎", engineLabel()) { pickEngine() }
+        asrCard.addView(engRow.view)
+        asrCard.addView(Ui.divider(this))
+        val keyRow = Ui.settingRow(this, "引擎密钥", keyStatusLabel()) { pickEngineKey() }
+        engineKeyValue = keyRow.value
+        asrCard.addView(keyRow.view)
+        asrCard.addView(Ui.divider(this))
+        val dirRow = Ui.settingRow(this, "语言方向", dirLabel()) { toggleDirection() }
         dirValue = dirRow.value
-        settings.addView(dirRow.view)
-        settings.addView(Ui.divider(this))
+        asrCard.addView(dirRow.view)
+        asrCard.addView(Ui.divider(this))
+        val micRow = Ui.settingRow(this, "收音来源", micLabel()) { toggleMic() }
+        asrCard.addView(micRow.view)
+        if (isVosk) {
+            asrCard.addView(Ui.divider(this))
+            val tierRow = Ui.settingRow(this, "识别精度", tierLabel()) { pickTier() }
+            asrCard.addView(tierRow.view)
+            asrCard.addView(Ui.divider(this))
+            val impRow = Ui.settingRow(this, "导入模型包", "zip 文件") { pickImport() }
+            asrCard.addView(impRow.view)
+        }
+        root.addView(asrCard)
+
+        // ② 翻译：翻译服务、朗读输出
+        val mtCard = Ui.card(this)
+        mtCard.addView(Ui.title(this, "翻译", 18f))
         val provRow = Ui.settingRow(this, "翻译服务", providerLabel()) { pickProvider() }
         providerValue = provRow.value
-        settings.addView(provRow.view)
-        settings.addView(Ui.divider(this))
+        mtCard.addView(provRow.view)
+        mtCard.addView(Ui.divider(this))
         val speakRow = Ui.settingRow(this, "朗读输出", speakDestLabel()) { pickSpeakDest() }
-        settings.addView(speakRow.view)
-        settings.addView(Ui.sectionTitle(this, "识别"))
-        val micRow = Ui.settingRow(this, "收音来源", micLabel()) { toggleMic() }
-        settings.addView(micRow.view)
-        settings.addView(Ui.divider(this))
-        val engRow = Ui.settingRow(this, "识别引擎", engineLabel()) { pickEngine() }
-        settings.addView(engRow.view)
-        settings.addView(Ui.divider(this))
-        val tierRow = Ui.settingRow(this, "识别精度", tierLabel()) { pickTier() }
-        settings.addView(tierRow.view)
-        settings.addView(Ui.divider(this))
-        val impRow = Ui.settingRow(this, "导入模型包", "zip 文件") { pickImport() }
-        settings.addView(impRow.view)
-        settings.addView(Ui.sectionTitle(this, "会话"))
+        mtCard.addView(speakRow.view)
+        root.addView(mtCard)
+
+        // ③ 会话：录音存档、静音自动停
+        val sessCard = Ui.card(this)
+        sessCard.addView(Ui.title(this, "会话", 18f))
         val recRow = Ui.switchRow(this, "录音存档（会后可分享）", TranslateStore.recordAudio(this)) { c ->
             TranslateStore.setRecordAudio(this, c)
         }
-        settings.addView(recRow.view)
-        settings.addView(Ui.divider(this))
+        sessCard.addView(recRow.view)
+        sessCard.addView(Ui.divider(this))
         val silRow = Ui.settingRow(this, "静音自动停", silenceLabel()) { pickSilence() }
         silenceValue = silRow.value
-        settings.addView(silRow.view)
-        root.addView(settings)
+        sessCard.addView(silRow.view)
+        root.addView(sessCard)
+
+        // ④ 其他：检查更新、诊断与设置
+        val curVer = try {
+            @Suppress("DEPRECATION")
+            packageManager.getPackageInfo(packageName, 0).versionName ?: ""
+        } catch (e: Exception) { "" }
+        val miscCard = Ui.card(this)
+        miscCard.addView(Ui.title(this, "其他", 18f))
+        miscCard.addView(Ui.settingRow(this, "检查更新", if (curVer.isEmpty()) "点此检查" else "当前 $curVer") {
+            UpdateManager.check(this, true)
+        }.view)
+        miscCard.addView(Ui.divider(this))
+        miscCard.addView(Ui.settingRow(this, "诊断与设置", "初始化、保活自检、诊断日志") {
+            startActivity(Intent(this, SetupActivity::class.java))
+        }.view)
+        root.addView(miscCard)
 
         scroll = ScrollView(this).apply {
             setBackgroundColor(Ui.BG)
@@ -126,9 +196,12 @@ class TranslateActivity : Activity() {
         }
         setContentView(scroll)
         Ui.fitSystemBars(scroll)
+        refreshConfigView()
         if (intent?.getBooleanExtra("auto_start", false) == true) {
-            // 借道授权/权限打开的：自动开始，服务起来后立即退回后台
-            autoStarted = true
+            // 借道授权/权限或主界面打开的：自动开始，但留在前台显示实时状态，
+            // 不再自动退后台（v0.9.2 修复「点翻译 App 缩小像闪退」）。
+            // 只有悬浮按钮借道（background_start）才在启动后退回后台。
+            backgroundStart = intent.getBooleanExtra("background_start", false)
             scroll.post { if (!running) startSession() }
         }
     }
@@ -137,7 +210,7 @@ class TranslateActivity : Activity() {
         super.onNewIntent(intent)
         setIntent(intent)
         if (intent.getBooleanExtra("auto_start", false) && !running) {
-            autoStarted = true
+            backgroundStart = intent.getBooleanExtra("background_start", false)
             startSession()
         }
     }
@@ -148,15 +221,34 @@ class TranslateActivity : Activity() {
         TranslateControl.partialListener = null
         TranslateControl.statusListener = null
         TranslateControl.levelListener = null
+        TranslateControl.errorListener = null
+        handler.removeCallbacks(liveTicker)
+        liveTicking = false
         // 切到其他 App 时字幕条接管显示（服务已在显示则幂等）
         if (TranslateControl.active) SubtitleOverlay.show(this)
     }
 
-    /** 开始/停止按钮随状态换字换色：运行中变红，一眼可辨。 */
+    /** 开始/停止按钮随状态换字换色：运行中变红，一眼可辨；最小化按钮只在运行中显示。 */
     private fun refreshStartBtn() {
         if (!::startBtn.isInitialized) return
         startBtn.text = if (running) "⏹ 停止翻译" else "▶ 开始翻译"
         startBtn.background = Ui.rounded(if (running) Ui.DANGER else Ui.ACCENT, 12, this)
+        if (::minimizeBtn.isInitialized) {
+            minimizeBtn.visibility = if (running) android.view.View.VISIBLE else android.view.View.GONE
+        }
+        if (::liveView.isInitialized) {
+            liveView.visibility = if (running) android.view.View.VISIBLE else android.view.View.GONE
+            if (running) {
+                refreshLiveLine()
+                if (!liveTicking) {
+                    liveTicking = true
+                    handler.postDelayed(liveTicker, 1000)
+                }
+            } else {
+                handler.removeCallbacks(liveTicker)
+                liveTicking = false
+            }
+        }
     }
 
     override fun onResume() {
@@ -165,8 +257,10 @@ class TranslateActivity : Activity() {
         from = TranslateStore.dirFrom(this)
         to = TranslateStore.dirTo(this)
         if (::dirValue.isInitialized) dirValue.text = dirLabel()
+        if (::engineKeyValue.isInitialized) engineKeyValue.text = keyStatusLabel()
         running = TranslateControl.active
         refreshStartBtn()
+        refreshConfigView()
         if (running && TranslateControl.statusText.isNotEmpty()) status(TranslateControl.statusText)
         // 回放本场已完成条目（服务在后台跑时打开本页也能看到完整列表）
         val buf = TranslateControl.entriesBuffer.toList()
@@ -198,6 +292,59 @@ class TranslateActivity : Activity() {
         TranslateControl.levelListener = { pct ->
             runOnUiThread { if (::levelBar.isInitialized) levelBar.progress = pct }
         }
+        TranslateControl.errorListener = { msg ->
+            runOnUiThread { showError(msg) }
+        }
+    }
+
+    /** 实际生效的识别引擎（与 TranslateService.startSessionInner 同一套判定，所见即所得）。 */
+    private fun effectiveEngineDesc(): String {
+        val eng = TranslateStore.asrEngine(this)
+        // 服务侧 effFrom：from=auto 且引擎不支持自动检测时回落 zh；日韩判定据此。
+        val autoCapable = eng == "volc" && TranslateStore.asrKey(this, "volc").isNotEmpty()
+        val eff = if (from == "auto") (if (autoCapable) "auto" else "zh") else from
+        val multiLang = eff == "ja" || eff == "ko"
+        if (eng == "tx") {
+            return if (TranslateStore.txConfigured(this))
+                "腾讯·实时识别（${TencentAsr.engineFor(eff)}）"
+            else "⚠️ 腾讯引擎未配置密钥（点开始会提示去填，不会悄悄换引擎）"
+        }
+        if (eng == "volc") {
+            return if (TranslateStore.asrKey(this, "volc").isNotEmpty()) {
+                if (multiLang) "火山·一句话识别（日韩多语种）" else "火山·流式识别 2.0"
+            } else "⚠️ 火山 Key 未填（日韩走云端渠道，中英走离线识别）"
+        }
+        val ch = CloudAsr.activeChannel(this)
+        if (ch != null) return "云端·${ch.name}（离线切分 + 云端重识别）"
+        if (eng != "vosk") return "⚠️ ${engineLabel()} Key 未填（将用离线识别）"
+        return "离线·${if (TranslateStore.modelTier(this) == "high") "高精度大模型" else "标准小模型"}"
+    }
+
+    private fun refreshConfigView() {
+        if (!::configView.isInitialized) return
+        configView.text = "实际生效：${effectiveEngineDesc()} · 方向：${dirLabel()} · 翻译：${mtName()}"
+    }
+
+    private fun refreshLiveLine() {
+        if (!::liveView.isInitialized || !running) return
+        val startAt = TranslateControl.sessionStartedAt
+        val secs = if (startAt > 0) ((System.currentTimeMillis() - startAt) / 1000).coerceAtLeast(0) else 0
+        val mm = "%02d:%02d".format(secs / 60, secs % 60)
+        val lines = TranslateControl.entriesBuffer.size
+        liveView.text = "翻译进行中 · ${dirLabel()} · ${effectiveEngineDesc()} · 已 $mm · 已出 $lines 句"
+    }
+
+    private fun showError(msg: String) {
+        if (!::errorView.isInitialized) return
+        errorView.text = msg
+        errorView.visibility = android.view.View.VISIBLE
+        Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+    }
+
+    private fun clearError() {
+        if (!::errorView.isInitialized) return
+        errorView.text = ""
+        errorView.visibility = android.view.View.GONE
     }
 
     private fun dirLabel(): String = when {
@@ -470,13 +617,41 @@ class TranslateActivity : Activity() {
             "openai" -> "OpenAI Whisper"
             "custom" -> "自定义渠道"
             "volc" -> "火山流式识别 2.0"
+            "tx" -> "腾讯云实时识别"
             else -> "离线"
         }
     }
 
+    /** 当前识别引擎的密钥状态（只显示已填/未填，不显示密钥本身）。 */
+    private fun keyStatusLabel(): String {
+        return when (TranslateStore.asrEngine(this)) {
+            "vosk" -> "无需密钥"
+            "tx" -> if (TranslateStore.txConfigured(this)) "已填" else "未填"
+            else -> if (TranslateStore.asrKey(this, TranslateStore.asrEngine(this)).isNotEmpty()) "已填" else "未填"
+        }
+    }
+
+    /** 引擎密钥二级入口：按当前引擎打开对应的填 Key 弹窗；离线引擎无需密钥。 */
+    private fun pickEngineKey() {
+        if (running) { Toast.makeText(this, "请先停止再改密钥", Toast.LENGTH_SHORT).show(); return }
+        when (TranslateStore.asrEngine(this)) {
+            "vosk" -> Toast.makeText(this, "离线引擎无需填密钥", Toast.LENGTH_SHORT).show()
+            "tx" -> askTxKeys()
+            "volc" -> askVolcKey()
+            "custom" -> askCustomAsr()
+            else -> {
+                val ch = CloudAsr.channelOf(this, TranslateStore.asrEngine(this))
+                if (ch == null) Toast.makeText(this, "该引擎无需填密钥", Toast.LENGTH_SHORT).show()
+                else askAsrKey(ch)
+            }
+        }
+    }
+
     private fun engineDesc(): String {
+        if (txMode()) return "腾讯·实时识别（中日韩真流式）"
+        if (TranslateStore.asrEngine(this) == "tx") return "腾讯 Key 未填（点开始会提示填 Key，不悄悄换引擎）"
         if (volcMode()) return "火山·流式识别2.0（真流式）"
-        if (TranslateStore.asrEngine(this) == "volc") return "火山 Key 未填，暂用离线识别"
+        if (TranslateStore.asrEngine(this) == "volc") return "火山 Key 未填（日韩走云端渠道，中英走离线识别）"
         val ch = CloudAsr.activeChannel(this)
         if (ch != null) return "云端·${ch.name}（离线切分+云端重识别）"
         if (TranslateStore.asrEngine(this) != "vosk") return "云端 Key 未填，暂用离线识别"
@@ -492,7 +667,8 @@ class TranslateActivity : Activity() {
             "云端 · 硅基流动 SenseVoice（国内直连，中文强）",
             "云端 · OpenAI Whisper（付费，约 $0.006/分钟）",
             "云端 · 自定义渠道（OpenAI 兼容接口）",
-            "云端 · 火山流式识别 2.0（真流式，识别最强；免费试用 20 小时）"
+            "云端 · 火山流式识别 2.0（真流式，识别最强；免费试用 20 小时）",
+            "云端 · 腾讯实时识别（中日韩真流式；每月免费 5 小时）"
         )
         android.app.AlertDialog.Builder(this)
             .setTitle("识别引擎（渠道可预设，Key 自己填）")
@@ -505,6 +681,7 @@ class TranslateActivity : Activity() {
                     4 -> selectCloud(CloudAsr.OPENAI)
                     5 -> askCustomAsr()
                     6 -> selectVolc()
+                    7 -> selectTx()
                 }
             }
             .setNegativeButton("取消", null)
@@ -512,11 +689,13 @@ class TranslateActivity : Activity() {
     }
 
     private fun selectCloud(ch: CloudAsr.Channel) {
-        TranslateStore.setAsrEngine(this, ch.id)
-        if (TranslateStore.asrKey(this, ch.id).isEmpty()) askAsrKey(ch) else recreate()
+        // v0.9.2：Key 没填完就取消时，引擎保持原值——旧版先把引擎切过去再弹 Key 框，
+        // 取消后界面显示新引擎、实际跑的却是旧引擎/离线，「模型对不上」的根源之一。
+        if (TranslateStore.asrKey(this, ch.id).isEmpty()) askAsrKey(ch, TranslateStore.asrEngine(this))
+        else { TranslateStore.setAsrEngine(this, ch.id); recreate() }
     }
 
-    private fun askAsrKey(ch: CloudAsr.Channel) {
+    private fun askAsrKey(ch: CloudAsr.Channel, prevEngine: String? = null) {
         val input = android.widget.EditText(this).apply {
             hint = "粘贴 ${ch.name} 的 API Key"
             setText(TranslateStore.asrKey(this@TranslateActivity, ch.id))
@@ -528,15 +707,21 @@ class TranslateActivity : Activity() {
             .setView(input)
             .setPositiveButton("保存") { _, _ ->
                 TranslateStore.setAsrKey(this, ch.id, input.text.toString().trim())
+                TranslateStore.setAsrEngine(this, ch.id)
                 Toast.makeText(this, "已保存，识别引擎：${ch.name}", Toast.LENGTH_SHORT).show()
                 recreate()
             }
             .setNeutralButton("获取 Key") { _, _ ->
                 try { startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(ch.keyUrl))) }
                 catch (e: Exception) { Toast.makeText(this, "打开失败，地址：${ch.keyUrl}", Toast.LENGTH_LONG).show() }
-                askAsrKey(ch)
+                askAsrKey(ch, prevEngine)
             }
-            .setNegativeButton("取消", null)
+            .setNegativeButton("取消") { _, _ ->
+                if (prevEngine != null && prevEngine != ch.id) {
+                    TranslateStore.setAsrEngine(this, prevEngine)
+                    recreate()
+                }
+            }
             .show()
     }
 
@@ -569,11 +754,12 @@ class TranslateActivity : Activity() {
     }
 
     private fun selectVolc() {
-        TranslateStore.setAsrEngine(this, "volc")
-        if (TranslateStore.asrKey(this, "volc").isEmpty()) askVolcKey() else recreate()
+        // v0.9.2：同 selectCloud，Key 框取消时引擎保持原值，不留半选中的引擎。
+        if (TranslateStore.asrKey(this, "volc").isEmpty()) askVolcKey(TranslateStore.asrEngine(this))
+        else { TranslateStore.setAsrEngine(this, "volc"); recreate() }
     }
 
-    private fun askVolcKey() {
+    private fun askVolcKey(prevEngine: String? = null) {
         val input = android.widget.EditText(this).apply {
             hint = "粘贴火山引擎 API Key（新版控制台）"
             setText(TranslateStore.asrKey(this@TranslateActivity, "volc"))
@@ -585,15 +771,73 @@ class TranslateActivity : Activity() {
             .setView(input)
             .setPositiveButton("保存") { _, _ ->
                 TranslateStore.setAsrKey(this, "volc", input.text.toString().trim())
+                TranslateStore.setAsrEngine(this, "volc")
                 Toast.makeText(this, "已保存，识别引擎：火山流式识别 2.0", Toast.LENGTH_SHORT).show()
                 recreate()
             }
             .setNeutralButton("获取 Key") { _, _ ->
                 try { startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://console.volcengine.com/iam/keymanage"))) }
                 catch (e: Exception) { Toast.makeText(this, "打开失败：console.volcengine.com → API Key 管理", Toast.LENGTH_LONG).show() }
-                askVolcKey()
+                askVolcKey(prevEngine)
             }
-            .setNegativeButton("取消", null)
+            .setNegativeButton("取消") { _, _ ->
+                if (prevEngine != null && prevEngine != "volc") {
+                    TranslateStore.setAsrEngine(this, prevEngine)
+                    recreate()
+                }
+            }
+            .show()
+    }
+
+    private fun selectTx() {
+        // v0.9.2：同 selectCloud，Key 框取消时引擎保持原值，不留「选了腾讯、Key 为空」的半选中状态。
+        if (!TranslateStore.txConfigured(this)) askTxKeys(TranslateStore.asrEngine(this))
+        else { TranslateStore.setAsrEngine(this, "tx"); recreate() }
+    }
+
+    /** 腾讯云实时 ASR 三值（AppId / SecretId / SecretKey），仿 askVolcKey 模式，只存本机。
+     *  prevEngine：从引擎选择进来的上一引擎，取消时恢复；从密钥入口进来的传 null（引擎已是 tx）。 */
+    private fun askTxKeys(prevEngine: String? = null) {
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val appIdIn = android.widget.EditText(this).apply {
+            hint = "AppId（纯数字）"
+            setText(TranslateStore.txAppId(this@TranslateActivity)); setSingleLine(true)
+        }
+        val secretIdIn = android.widget.EditText(this).apply {
+            hint = "SecretId（AKID 开头）"
+            setText(TranslateStore.txSecretId(this@TranslateActivity)); setSingleLine(true)
+        }
+        val secretKeyIn = android.widget.EditText(this).apply {
+            hint = "SecretKey"
+            setText(TranslateStore.txSecretKey(this@TranslateActivity)); setSingleLine(true)
+        }
+        box.addView(appIdIn); box.addView(secretIdIn); box.addView(secretKeyIn)
+        android.app.AlertDialog.Builder(this)
+            .setTitle("腾讯云实时识别的 Key")
+            .setMessage("腾讯云实时语音识别（16k_ja/16k_ko/16k_zh），中日韩都走真流式。每月免费 5 小时，超量境内约 3 元/小时。\nAppId 在腾讯云账号中心查；SecretId/SecretKey 在控制台 → 访问管理 → API 密钥管理 创建。\n三值只存本机，只发往腾讯云官方接口。")
+            .setView(box)
+            .setPositiveButton("保存") { _, _ ->
+                TranslateStore.setTxCreds(
+                    this,
+                    appIdIn.text.toString().trim(),
+                    secretIdIn.text.toString().trim(),
+                    secretKeyIn.text.toString().trim()
+                )
+                TranslateStore.setAsrEngine(this, "tx")
+                Toast.makeText(this, "已保存，识别引擎：腾讯云实时识别", Toast.LENGTH_SHORT).show()
+                recreate()
+            }
+            .setNeutralButton("获取 Key") { _, _ ->
+                try { startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://console.cloud.tencent.com/cam/capi"))) }
+                catch (e: Exception) { Toast.makeText(this, "打开失败：console.cloud.tencent.com → 访问管理 → API 密钥管理", Toast.LENGTH_LONG).show() }
+                askTxKeys(prevEngine)
+            }
+            .setNegativeButton("取消") { _, _ ->
+                if (prevEngine != null && prevEngine != "tx") {
+                    TranslateStore.setAsrEngine(this, prevEngine)
+                    recreate()
+                }
+            }
             .show()
     }
 
@@ -696,6 +940,15 @@ class TranslateActivity : Activity() {
     private fun status(s: String) { if (::statusView.isInitialized) statusView.text = s }
 
     private fun startSession() {
+        // v0.9.2：选了腾讯引擎但密钥没填满，点开始也不悄悄换引擎——先弹填 Key 对话框。
+        // 服务侧还有一道同样的拦截（悬浮按钮直启时兜底）。
+        if (TranslateStore.asrEngine(this) == "tx" && !TranslateStore.txConfigured(this)) {
+            Toast.makeText(this, "腾讯引擎还没填密钥，先填 AppId、SecretId、SecretKey", Toast.LENGTH_LONG).show()
+            status("⚠️ 腾讯引擎未配置密钥，请先填好再开始")
+            askTxKeys()
+            return
+        }
+        clearError()
         if (TranslateStore.micSource(this) != "internal" &&
             checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 7)
@@ -720,13 +973,21 @@ class TranslateActivity : Activity() {
 
     /** 启动后台翻译服务并跟随其状态；悬浮按钮直启时根本不会打开本页。 */
     private fun startServiceSession() {
-        TranslateService.start(this)
+        try {
+            TranslateService.start(this)
+        } catch (t: Throwable) {
+            DiagLog.logSync(this, "ui_start_fail", mapOf("error" to t.toString()))
+            status("❌ 启动失败：${t.message ?: "未知错误"}，已记入诊断日志")
+            return
+        }
         running = true
         refreshStartBtn()
+        refreshConfigView()
         status("🎙 正在听（${engineDesc()}）… 边说边翻，译文滚动输出")
-        if (autoStarted) {
-            // 借道授权打开的：服务起来后立即退回后台，不打扰阅读
-            autoStarted = false
+        // v0.9.2：只在悬浮按钮借道启动（background_start）时退回后台；
+        // 主界面点「开始翻译」一律留在前台，显示实时状态，不再自动缩小。
+        if (backgroundStart) {
+            backgroundStart = false
             Toast.makeText(this, "翻译已开始，字幕在屏幕下方", Toast.LENGTH_SHORT).show()
             moveTaskToBack(true)
         }
@@ -763,6 +1024,7 @@ class TranslateActivity : Activity() {
         TranslateService.stop(this)
         running = false
         refreshStartBtn()
+        clearError()
         partialView.text = ""
         if (::levelBar.isInitialized) levelBar.progress = 0
         status("已停止")
@@ -773,6 +1035,9 @@ class TranslateActivity : Activity() {
         TranslateControl.partialListener = null
         TranslateControl.statusListener = null
         TranslateControl.levelListener = null
+        TranslateControl.errorListener = null
+        handler.removeCallbacks(liveTicker)
+        liveTicking = false
         super.onDestroy()
     }
 }

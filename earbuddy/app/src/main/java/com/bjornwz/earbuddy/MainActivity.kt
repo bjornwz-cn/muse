@@ -135,6 +135,13 @@ class MainActivity : Activity() {
         dirValue = dirRow.value
         transCard.addView(dirRow.view)
         transCard.addView(Ui.divider(this))
+        // v0.9.2：翻译设置直接入口——旧版要进设置只能先点「开始翻译」，
+        // 现在不用启动会话就能进翻译页改引擎/方向/密钥。
+        val settingsRow = Ui.settingRow(this, "翻译设置", transEngineShort()) {
+            startActivity(Intent(this, TranslateActivity::class.java))
+        }
+        transCard.addView(settingsRow.view)
+        transCard.addView(Ui.divider(this))
         val recRow = Ui.settingRow(this, "翻译记录", "") {
             startActivity(Intent(this, RecordsActivity::class.java))
         }
@@ -185,6 +192,25 @@ class MainActivity : Activity() {
             f == "auto" && t == "auto" -> "双向自动"
             f == "auto" -> "自动 → ${TranslateStore.langName(t)}"
             else -> "${TranslateStore.langName(f)} → ${TranslateStore.langName(t)}"
+        }
+    }
+
+    /** 实际生效的识别引擎短标签（与 TranslateService 同一套判定，所见即所得）。 */
+    private fun transEngineShort(): String {
+        val eng = TranslateStore.asrEngine(this)
+        val f = TranslateStore.dirFrom(this)
+        val autoCapable = eng == "volc" && TranslateStore.asrKey(this, "volc").isNotEmpty()
+        val eff = if (f == "auto") (if (autoCapable) "auto" else "zh") else f
+        val multiLang = eff == "ja" || eff == "ko"
+        return when {
+            eng == "tx" && TranslateStore.txConfigured(this) -> "腾讯·实时识别"
+            eng == "tx" -> "⚠️ 腾讯 Key 未填"
+            eng == "volc" && TranslateStore.asrKey(this, "volc").isNotEmpty() ->
+                if (multiLang) "火山·一句话识别" else "火山·流式识别"
+            eng == "volc" -> "⚠️ 火山 Key 未填"
+            CloudAsr.activeChannel(this) != null -> "云端·${CloudAsr.activeChannel(this)!!.name}"
+            eng != "vosk" -> "⚠️ Key 未填（离线）"
+            else -> "离线识别"
         }
     }
 

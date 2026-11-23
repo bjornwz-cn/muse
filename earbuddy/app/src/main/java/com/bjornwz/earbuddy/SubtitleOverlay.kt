@@ -29,6 +29,14 @@ object TranslateControl {
     @Volatile var statusListener: ((String) -> Unit)? = null
     @Volatile var levelListener: ((Int) -> Unit)? = null
     @Volatile var levelValue: Int = 0
+    /** 本场开始时间（服务维护，翻译页据此显示「已进行时长」）；0 表示未在会话中。 */
+    @Volatile var sessionStartedAt: Long = 0L
+    /** 最近一次识别/引擎错误的可读原因（翻译页红字显示 + toast）；服务只在会话内发布。 */
+    @Volatile var errorListener: ((String) -> Unit)? = null
+
+    fun publishError(msg: String) {
+        errorListener?.invoke(msg)
+    }
 
     fun publishLevel(pct: Int) {
         levelValue = pct

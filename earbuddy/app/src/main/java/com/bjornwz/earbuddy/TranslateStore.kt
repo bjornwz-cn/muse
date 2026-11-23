@@ -127,6 +127,17 @@ object TranslateStore {
         prefs(ctx).getString("asr_key_$channel", "") ?: ""
     fun setAsrKey(ctx: Context, channel: String, v: String) =
         prefs(ctx).edit().putString("asr_key_$channel", v).apply()
+    // ——— 腾讯云实时 ASR（引擎 id "tx"）：三值分开存（AppId / SecretId / SecretKey），
+    // 存本机 SharedPreferences，与火山 Key 同级；源码/资源/文档中不出现真实值。———
+    fun txAppId(ctx: Context) = prefs(ctx).getString("tx_appid", "") ?: ""
+    fun txSecretId(ctx: Context) = prefs(ctx).getString("tx_secret_id", "") ?: ""
+    fun txSecretKey(ctx: Context) = prefs(ctx).getString("tx_secret_key", "") ?: ""
+    fun setTxCreds(ctx: Context, appId: String, secretId: String, secretKey: String) =
+        prefs(ctx).edit().putString("tx_appid", appId)
+            .putString("tx_secret_id", secretId)
+            .putString("tx_secret_key", secretKey).apply()
+    fun txConfigured(ctx: Context) = txAppId(ctx).isNotEmpty() &&
+        txSecretId(ctx).isNotEmpty() && txSecretKey(ctx).isNotEmpty()
     fun customAsrBase(ctx: Context) = prefs(ctx).getString("asr_custom_base", "") ?: ""
     fun customAsrModel(ctx: Context) = prefs(ctx).getString("asr_custom_model", "") ?: ""
     fun setCustomAsr(ctx: Context, base: String, model: String) =

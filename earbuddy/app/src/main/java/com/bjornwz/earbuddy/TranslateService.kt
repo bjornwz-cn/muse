@@ -1,5 +1,6 @@
 package com.bjornwz.earbuddy
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -7,11 +8,13 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.provider.Settings
 
 /**
  * 实时翻译会话服务（前台）：会话的真正宿主。
@@ -25,6 +28,7 @@ class TranslateService : Service() {
     @Volatile private var running = false
     @Volatile private var pausedByCall = false
     private var volc: VolcAsr? = null
+    private var tx: TencentAsr? = null
     private var from = "zh"
     private var to = "en"
     /** 实际喂给识别引擎的源语言：from=auto 且引擎不支持自动检测时回落 zh。 */
@@ -34,6 +38,8 @@ class TranslateService : Service() {
      *  2026-11-20 实测：流式接口（bigmodel_async）传 language=ja-JP 不报错，
      *  但返回的是罗马音（且不准）；官方文档亦注明 language 参数仅一句话识别支持。 */
     private var useVolc = false
+    /** 腾讯云实时 ASR（16k_ja/16k_ko/16k_zh）：中日韩都走真流式，替代火山流式＋日韩 nostream 路径。 */
+    private var useTx = false
     /** 日韩首选：火山一句话识别（多语种，与流式共用一把 Key）。 */
     private var useNostream = false
     private var sessionChannel: CloudAsr.Channel? = null
@@ -104,9 +110,16 @@ class TranslateService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACTION_STOP -> stopSession()
-            else -> startSession()
+        try {
+            when (intent?.action) {
+                ACTION_STOP -> stopSession()
+                else -> startSession()
+            }
+        } catch (t: Throwable) {
+            // 最后一道防线：启动/停止路径的任何未捕获异常都不能让服务带崩整个进程
+            DiagLog.logSync(this, "svc_cmd_fail", mapOf("error" to t.toString()))
+            try { stopForegroundCompat() } catch (e: Exception) { }
+            try { stopSelf() } catch (e: Exception) { }
         }
         return START_NOT_STICKY
     }
@@ -114,7 +127,12 @@ class TranslateService : Service() {
     private fun volcMode() = TranslateStore.asrEngine(this) == "volc" &&
         TranslateStore.asrKey(this, "volc").isNotEmpty()
 
+    /** 腾讯云实时 ASR 已选且三值（AppId/SecretId/SecretKey）都已填。 */
+    private fun txMode() = TranslateStore.asrEngine(this) == "tx" &&
+        TranslateStore.txConfigured(this)
+
     private fun engineDesc(): String {
+        if (useTx) return "腾讯·实时识别（${TencentAsr.engineFor(effFrom)}）"
         if (useNostream) return "火山·多语种识别（日韩）"
         if (cloudPrimary) return "云端·${sessionChannel?.name ?: "多语种"}（日韩识别）"
         if (volcMode()) return "火山·流式识别2.0"
@@ -129,7 +147,30 @@ class TranslateService : Service() {
         SubtitleOverlay.status(s)
     }
 
+    /** 启动入口（带兜底）：startSessionInner 里任何未捕获的 Throwable 都不能闪退，
+     *  只记日志、报状态、干净收尾。 */
     private fun startSession() {
+        try {
+            startSessionInner()
+        } catch (t: Throwable) {
+            DiagLog.logSync(
+                this, "tr_start_fail",
+                mapOf(
+                    "error" to t.toString(),
+                    "engine" to TranslateStore.asrEngine(this),
+                    "from" to from, "to" to to, "tx" to useTx, "volc" to useVolc
+                )
+            )
+            running = false
+            TranslateStore.setActive(this, false)
+            TranslateControl.active = false
+            status("❌ 启动失败：${t.message ?: "未知错误"}，已记入诊断日志")
+            stopForegroundCompat()
+            stopSelf()
+        }
+    }
+
+    private fun startSessionInner() {
         if (running) return
         startForegroundCompat()
         from = TranslateStore.dirFrom(this)
@@ -144,7 +185,11 @@ class TranslateService : Service() {
         cloudPrimary = false
         useNostream = false
         useVolc = volcMode() && !multiLang
-        if (multiLang) {
+        useTx = txMode()
+        if (useTx) {
+            // 腾讯实时 ASR 中日韩都走真流式：不借云端渠道、不走 nostream、不走 VAD 切段
+            sessionChannel = null
+        } else if (multiLang) {
             // 首选火山一句话识别（多语种，与流式共用同一把 Key，已实测日语通过）；
             // 没填火山 Key 时才借任意一个已填 Key 的云端渠道（SenseVoice/Whisper）
             useNostream = TranslateStore.asrKey(this, "volc").isNotEmpty()
@@ -156,6 +201,41 @@ class TranslateService : Service() {
                     }
             }
             cloudPrimary = useNostream || sessionChannel != null
+        }
+        // 启动前状态快照（同步写盘）：万一随后闪退，诊断日志里能看到当时走的哪条路。
+        // 只记“是否已填”布尔值，绝不记密钥本身。
+        DiagLog.logSync(
+            this, "tr_start_state",
+            mapOf(
+                "engine" to TranslateStore.asrEngine(this),
+                "from" to from, "to" to to, "effFrom" to effFrom,
+                "tx" to useTx, "volc" to useVolc, "nostream" to useNostream,
+                "txConfigured" to TranslateStore.txConfigured(this),
+                "volcKey" to TranslateStore.asrKey(this, "volc").isNotEmpty(),
+                "mic" to TranslateStore.micSource(this),
+                "provider" to TranslateStore.provider(this),
+                "recPerm" to (checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
+                    PackageManager.PERMISSION_GRANTED),
+                "overlay" to Settings.canDrawOverlays(this)
+            )
+        )
+        // v0.9.2：选了腾讯引擎但三项密钥未填满时，禁止静默回退到别的引擎启动。
+        // 旧行为是悄悄改走火山一句话/离线，界面上还显示「腾讯云实时识别」，用户
+        // 以为在用腾讯——这就是「翻译用的模型对不上」。现在明确拦下并提示去填。
+        if (TranslateStore.asrEngine(this) == "tx" && !TranslateStore.txConfigured(this)) {
+            DiagLog.logSync(
+                this, "tr_blocked",
+                mapOf("engine" to "tx", "reason" to "tx_keys_missing")
+            )
+            val msg = "❌ 腾讯引擎未配置：请先在翻译设置 → 识别引擎 → 引擎密钥里填 AppId、SecretId、SecretKey"
+            status(msg)
+            android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_LONG).show()
+            TranslateStore.setActive(this, false)
+            TranslateControl.active = false
+            TranslateControl.sessionStartedAt = 0L
+            stopForegroundCompat()
+            stopSelf()
+            return
         }
         // 日韩 nostream 流式化（v0.8.9）：流式接口实测不支持日语（见 VolcSegmentAsr 注释），
         // 仍走一句话识别，但切段与聚合都按音频时间走，不再按 Vosk 垃圾文本标点切。
@@ -172,6 +252,7 @@ class TranslateService : Service() {
         entries.clear()
         TranslateControl.entriesBuffer.clear()
         if (startedAt == 0L) startedAt = System.currentTimeMillis()
+        TranslateControl.sessionStartedAt = startedAt
         // 会话录音存档：与翻译同步开始（写入点挂在 VoskManager 的采集路径上）
         if (TranslateStore.recordAudio(this)) {
             SessionRecorder.start(applicationContext, startedAt)
@@ -182,7 +263,7 @@ class TranslateService : Service() {
             this, "tr_start",
             mapOf(
                 "from" to from, "to" to to, "engine" to TranslateStore.asrEngine(this),
-                "nostream" to useNostream, "volc" to useVolc,
+                "nostream" to useNostream, "volc" to useVolc, "tx" to useTx,
                 "src" to TranslateStore.micSource(this), "provider" to TranslateStore.provider(this)
             )
         )
@@ -191,12 +272,13 @@ class TranslateService : Service() {
         status("🎙 正在听（${engineDesc()}）…")
         handler.removeCallbacks(callWatcher)
         handler.postDelayed(callWatcher, 1000)
-        if ((effFrom == "ja" || effFrom == "ko") && !cloudPrimary) {
+        if ((effFrom == "ja" || effFrom == "ko") && !cloudPrimary && !useTx) {
             status("❌ 日语/韩语识别需先填 Key：火山、硅基流动、Groq 任一（在「识别引擎」里）")
             handler.postDelayed({ stopSession() }, 3500)
             return
         }
         if (useVolc) { beginEngines(); return }
+        if (useTx) { beginEngines(); return } // 腾讯不依赖离线模型，直接进引擎
         val lang = VoskManager.variant(this, effFrom)
         if (VoskManager.isReady(this, lang)) { beginEngines(); return }
         status("正在下载${lang.label}识别模型（${lang.sizeHint}，只下一次）…")
@@ -213,11 +295,70 @@ class TranslateService : Service() {
         }
     }
 
+    /** 引擎启动入口（带兜底）：任一引擎分支抛异常都不闪退，只记日志、报状态、延时停会话。 */
     private fun beginEngines() {
+        try {
+            beginEnginesInner()
+        } catch (t: Throwable) {
+            DiagLog.logSync(
+                this, "engine_start_fail",
+                mapOf(
+                    "error" to t.toString(),
+                    "engine" to TranslateStore.asrEngine(this),
+                    "tx" to useTx, "volc" to useVolc, "mic" to TranslateStore.micSource(this)
+                )
+            )
+            status("❌ 引擎启动失败：${t.message ?: "未知错误"}，已记入诊断日志")
+            handler.postDelayed({ stopSession() }, 2500)
+        }
+    }
+
+    private fun beginEnginesInner() {
         if (!running || pausedByCall) return
         lastActivityAt = System.currentTimeMillis()
         committedLen = 0; segStartAt = 0L; lastPartial = ""
         status("🎙 正在听（${engineDesc()}）… 边说边翻")
+        if (useTx) {
+            // 腾讯云实时 ASR：拉模式，阻塞队列桥接现有推模式采集泵（不让 SDK 自己采麦）。
+            // startPumpMic 不写 VoskManager 环形缓冲（samplePos 不走），commitSegment 对腾讯
+            // 路径一律 wav=null 直接进 onSentence（见 commitSegment 开头）。
+            val session = TencentAsr(
+                context = this,
+                appId = TranslateStore.txAppId(this).toIntOrNull() ?: 0,
+                secretId = TranslateStore.txSecretId(this),
+                credentialProvider = com.tencent.aai.auth.LocalCredentialProvider(
+                    TranslateStore.txSecretKey(this)
+                ),
+                engineModelType = TencentAsr.engineFor(effFrom),
+                onPartial = { p -> onPartialText(p) },
+                onFinal = { text -> onFinalText(text) },
+                onError = { msg ->
+                    DiagLog.log(this, "asr_error", mapOf("engine" to "tx_stream", "msg" to msg.take(120)))
+                    status("❌ $msg")
+                },
+                onReady = { status("🎙 正在听（${engineDesc()}）… 边说边翻") }
+            )
+            tx = session
+            session.start()
+            if (TranslateStore.micSource(this) == "internal") {
+                if (!InternalCapture.isRunning() && !InternalCapture.resumeCapture()) {
+                    status("❌ 内部声音需先在 App 内授权一次")
+                    return
+                }
+                VoskManager.startPumpChunks(
+                    chunkSource = { InternalCapture.nextChunk() },
+                    onChunk = { bytes -> session.sendPcm(bytes) },
+                    onLevel = { pct -> onAudioLevel(pct) }
+                )
+            } else {
+                VoskManager.startPumpMic(this,
+                    onChunk = { bytes -> session.sendPcm(bytes) },
+                    onLevel = { pct -> onAudioLevel(pct) },
+                    onError = { msg -> status("❌ 录音中断：$msg") }
+                )
+            }
+            return
+        }
         if (useVolc) {
             val session = VolcAsr(
                 apiKey = TranslateStore.asrKey(this, "volc"),
@@ -282,6 +423,7 @@ class TranslateService : Service() {
 
     private fun pauseEngines() {
         volc?.closeNow(); volc = null
+        tx?.closeNow(); tx = null
         VoskManager.pauseCapture(this)
     }
 
@@ -399,13 +541,26 @@ class TranslateService : Service() {
     }
 
     private fun commitSegment(voskText: String, wav: ByteArray?, audioEndSec: Double? = null) {
+        if (useTx) {
+            // 腾讯路径：startPumpMic 不写 VoskManager 环形缓冲，wav 无意义，直接进句子聚合
+            if (voskText.isNotBlank()) onSentence(voskText)
+            return
+        }
         if (cloudPrimary && useNostream) {
             if (wav == null) return
             VolcSegmentAsr.transcribe(
                 this, TranslateStore.asrKey(this, "volc"), stripWavHeader(wav), effFrom
-            ) { text ->
+            ) { text, reason ->
                 if (text.isNullOrBlank()) {
-                    DiagLog.log(this, "asr_error", mapOf("engine" to "volc_nostream", "lang" to effFrom))
+                    // v0.9.2：报错必须可见（状态栏 + 翻译页红字 + toast），并把真实原因记进日志。
+                    // 旧代码只记秃秃的 asr_error，2026-11-23 当天全是 12 秒无响应却查不出原因。
+                    val why = reason ?: "识别失败（原因未知）"
+                    DiagLog.log(this, "asr_error", mapOf(
+                        "engine" to "volc_nostream", "lang" to effFrom,
+                        "reason" to why.take(200)
+                    ))
+                    status("❌ 识别失败：$why")
+                    TranslateControl.publishError("识别失败：$why")
                 }
                 val srcFinal = text?.takeIf { it.isNotBlank() } ?: ""
                 if (srcFinal.isNotBlank()) feedSentence(srcFinal, audioEndSec)
@@ -557,6 +712,10 @@ class TranslateService : Service() {
         pausedByCall = false
         handler.removeCallbacks(callWatcher)
         volc?.closeNow(); volc = null
+        tx?.closeNow(); tx = null
+        // v0.9.2：掐断进行中的一句话识别请求——旧代码停会话后请求还在跑，
+        // 12 秒后重试、24 秒后才报 asr_error，日志里看着像停后还在出错。
+        VolcSegmentAsr.cancelAll()
         VoskManager.pauseCapture(this)
         // 录音收尾：WAV 落盘 → 后台转 m4a（成功后删 WAV 省空间）
         val sid = startedAt
@@ -564,6 +723,7 @@ class TranslateService : Service() {
         TranslateStore.setActive(this, false)
         TranslateControl.active = false
         TranslateControl.stopper = null
+        TranslateControl.sessionStartedAt = 0L
         TranslateControl.publishPartial("")
         TranslateControl.publishStatus("已停止")
         SubtitleOverlay.hide()
@@ -605,11 +765,14 @@ class TranslateService : Service() {
             running = false
             handler.removeCallbacks(callWatcher)
             volc?.closeNow(); volc = null
+            tx?.closeNow(); tx = null
+            VolcSegmentAsr.cancelAll()
             VoskManager.pauseCapture(this)
             SessionRecorder.stop() // 兜底收尾，文件保留（记录可能未及保存引用）
             TranslateStore.setActive(this, false)
             TranslateControl.active = false
             TranslateControl.stopper = null
+            TranslateControl.sessionStartedAt = 0L
             SubtitleOverlay.hide()
         }
         vadHandler.removeCallbacks(vadTicker)
