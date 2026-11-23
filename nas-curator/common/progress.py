@@ -38,6 +38,7 @@ ETA 算不出来（无速率、剩余为 0、总数未知）时一律返回 None
 """
 from __future__ import annotations
 
+import glob
 import json
 import os
 import re
@@ -53,6 +54,10 @@ _DEFAULT_DB = os.path.join(_PROJECT_ROOT, "data", "nas-curator.db")
 _TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _PROG_LINE_RE = re.compile(r"PROG\s+(\d+)\s*/\s*(\d+)\s+(\d+)s")
 _TODO_RE = re.compile(r"to classify \(SigLIP\):\s*(\d+)")
+_VLM_OK_RE = re.compile(r"^OK rq=(\d+)", re.M)
+_VLM_FAIL_RE = re.compile(r"^(?:decode_failed|api_error|write_failed) rq=\d+", re.M)
+_VLM_TOPROCESS_RE = re.compile(r"to process: (\d+)")
+_VLM_PROG_RE = re.compile(r"^\.\.\. (\d+)/(\d+) done, (\d+)s elapsed", re.M)
 
 
 # ---------------------------------------------------------------- 时间
@@ -232,17 +237,83 @@ def read_heartbeats(progress_dir=None, now=None):
 
 # ---------------------------------------------------------------- 兜底推导：年份重分类（旧版脚本不写心跳）
 
-def derive_year_progress(data_dir=None, now=None):
-    """从 year_siglip 的日志与结果文件推导进度（source='derived'）。
+def _derive_year_vlm(vlm_logs, now_dt):
+    """从 year_vlm*.log（首轮 + 断点续跑）推导 VLM 阶段进度。
 
-    依据（全部是脚本自己产出的真实产物）：
-    - /data/year_siglip_results.jsonl 行数 − 日志里 "already classified" 的
-      已有行数 = 本轮已分类数（逐行刷盘；直接数行数会把上一轮断点续跑的
-      500 行也算进来，百分比会破百）。
-    - /data/year_siglip.log 最后一行 PROG d/t secs = 脚本自报的
-      已做/总数/已耗时（每 200 项打印一次）；总数取不到时用
-      "to classify (SigLIP): N" 那行。
-    - 汇总文件 year_reclassify_summary.json 存在即视为本阶段跑完。
+    判定逻辑（“阶段已完成”vs“真中断”，2026-11-23 用户真机问题）：
+    - done = 全部 VLM 日志里去重后的 OK rq id 数（续跑会重看已做项的
+      邻居，跨日志直接加行数会重复计；首轮 166 + 续跑新增 = 真实 done）。
+    - total = 各日志 "to process: N" 的最大值（首轮的总数；续跑的
+      是剩余数，不能拿来当阶段总数）。
+    - done >= total → 阶段已完成：status done、stale False——心跳停
+      是因为阶段结束了，不是中断。
+    - done < total 且最新日志新鲜（10 分钟内）→ 进行中。
+    - done < total 且最新日志超过 10 分钟未更新 → 真中断：status 仍
+      为 running、stale True（标“已失联”）。
+    速率取最新日志最后一条 "... N/M done, Xs elapsed" 行的 N/X。
+    """
+    done_ids = set()
+    failed = 0
+    total = None
+    last_prog = None  # (done_n, elapsed_s)，取最新日志的最后一条
+    updated = None
+    for path in vlm_logs:  # 调用方已按 mtime 升序：后处理的是最新的
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError:
+            continue
+        done_ids |= set(_VLM_OK_RE.findall(text))
+        failed += len(_VLM_FAIL_RE.findall(text))
+        for m in _VLM_TOPROCESS_RE.finditer(text):
+            n = int(m.group(1))
+            total = n if total is None else max(total, n)
+        progs = _VLM_PROG_RE.findall(text)
+        if progs:
+            last_prog = (int(progs[-1][0]), int(progs[-1][2]))
+        mt = datetime.fromtimestamp(
+            os.path.getmtime(path)).strftime("%Y-%m-%dT%H:%M:%S")
+        updated = mt if updated is None else max(updated, mt)
+    done = len(done_ids)
+    prog = compute_progress(total, done, 0, failed, None, None)
+    if last_prog and last_prog[1] >= 60:
+        rate = round(last_prog[0] / (last_prog[1] / 60.0), 1)
+        prog["rate_per_min"] = rate
+        prog["elapsed_s"] = last_prog[1]
+        if rate and prog.get("pending"):
+            prog["eta_seconds"] = int(round(prog["pending"] / (rate / 60.0)))
+    status = "running"
+    stale = False
+    if total and done >= total:
+        status = "done"
+    elif updated:
+        upd = parse_ts(updated)
+        if upd is not None:
+            stale = (now_dt - upd).total_seconds() > STALE_AFTER_S
+    rec = {
+        "task_id": "year-reclassify", "label": "年份文件夹重分类",
+        "kind": "year-reclassify", "phase": "vlm", "status": status,
+        "source": "derived", "started_at": None, "updated_at": updated,
+        "errors": [], "extra": {}, "stale": stale,
+    }
+    rec.update(prog)
+    if status == "done":
+        rec["finished"] = True
+    return rec
+
+
+def derive_year_progress(data_dir=None, now=None):
+    """从年份重分类各阶段的产物推导进度（source='derived'）。
+
+    阶段按产物倒序判定（最新的阶段优先），只认脚本自己产出的真实产物：
+    1. 汇总文件 year_reclassify_summary.json 存在 → 全部完成，done。
+    2. year_vlm*.log 存在 → 当前阶段是 VLM（首轮 + 断点续跑日志一起算，
+       done 按 OK rq id 去重；判定逻辑见 _derive_year_vlm）。
+    3. year_vlm_rqids.txt 非空、无 VLM 日志 → register 已产出待看图清单、
+       VLM 尚未启动：阶段记 vlm、done 0；它还没开始跑，不存在“心跳
+       中断”，stale 恒为 False。
+    4. 否则按 SigLIP 产物推导（year_siglip.log 的 PROG 行与
+       year_siglip_results.jsonl 的行数 − 已有行数）。
     产物都不存在时返回 None（本任务尚未开始）。
     """
     d = data_dir
@@ -273,6 +344,33 @@ def derive_year_progress(data_dir=None, now=None):
         }
         rec.update(compute_progress(total or None, done, 0, 0, None, rec["updated_at"]))
         return rec
+    # 2. VLM 阶段：year_vlm*.log 存在即当前阶段是 VLM（不是 siglip——
+    # 阶段名滞后就是因为旧版只认 SigLIP 产物，VLM 在跑也显示 siglip）。
+    vlm_logs = sorted(
+        glob.glob(os.path.join(d, "year_vlm*.log")),
+        key=lambda p: os.path.getmtime(p))
+    if vlm_logs:
+        return _derive_year_vlm(vlm_logs, now_dt)
+    # 3. register 已产出待看图清单、VLM 尚未启动。
+    rqids_path = os.path.join(d, "year_vlm_rqids.txt")
+    if os.path.exists(rqids_path):
+        try:
+            with open(rqids_path, encoding="utf-8") as f:
+                n_rq = len([t for t in re.split(r"[\s,]+", f.read()) if t])
+        except OSError:
+            n_rq = 0
+        if n_rq > 0:
+            updated = datetime.fromtimestamp(
+                os.path.getmtime(rqids_path)).strftime("%Y-%m-%dT%H:%M:%S")
+            rec = {
+                "task_id": "year-reclassify", "label": "年份文件夹重分类",
+                "kind": "year-reclassify", "phase": "vlm", "status": "running",
+                "source": "derived", "started_at": None, "updated_at": updated,
+                "errors": [], "extra": {}, "stale": False,
+            }
+            rec.update(compute_progress(n_rq, 0, 0, 0, None, None))
+            return rec
+    # 4. SigLIP 阶段。
     if not os.path.exists(results_path) and not os.path.exists(log_path):
         return None
     # JSONL 可能已有上一轮断点续跑的行（日志 "already classified ...: N"），

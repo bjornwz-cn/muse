@@ -201,6 +201,99 @@ def test_derive_year_done_when_all_classified(tmp_path):
     assert rec["finished"] is True
 
 
+# ---------------------------------------------------------------- 兜底推导：VLM 阶段
+
+def _write_vlm_log(d, name, ids, total=4995, prog=None, skipped=0,
+                   fail_ids=()):
+    lines = [
+        "primary: agent-plan | model: deepseek-v4-1-flash-261017 | billing: free",
+        "fallback: model-3 | model: deepseek-v4-1-flash-economy-261017 | billing: payg",
+        "pending low_conf images: 15738 | already written (skipped): %d | to process: %d"
+        % (skipped, total),
+    ]
+    for i, rid in enumerate(ids):
+        lines.append("OK rq=%d 自拍(0.60) deepseek-v4-1-flash-261017 2.0s" % rid)
+        if prog and i + 1 == prog[0]:
+            lines.append("... %d/%d done, %ds elapsed, ~%ds left"
+                         % (prog[0], total, prog[1], 0))
+    for rid in fail_ids:
+        lines.append("api_error rq=%d boom" % rid)
+    (d / name).write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_derive_year_vlm_interrupted(tmp_path):
+    # 真实情况（2026-11-23 16:18）：首轮 VLM 做到 166/4995 被容器重启杀掉，
+    # 日志停在 16:18；now 16:35，相隔 17 分钟 → 阶段进行中但心跳停了，
+    # 是真中断：phase 必须是 vlm（不是 siglip）、status running、stale True。
+    d = tmp_path
+    _write_vlm_log(d, "year_vlm.log", range(106000, 106166),
+                   total=4995, prog=(100, 104))
+    old = 1763887200  # 2026-11-23T14:00:00+08:00（只为让 mtime 变旧）
+    os.utime(d / "year_vlm.log", (old, old))
+    rec = PROG.derive_year_progress(str(d), now="2026-11-23T16:35:00")
+    assert rec["phase"] == "vlm" and rec["status"] == "running"
+    assert rec["stale"] is True
+    assert rec["total"] == 4995 and rec["done"] == 166
+    assert rec["pct"] == pytest.approx(3.3, abs=0.1)
+    assert rec["rate_per_min"] == pytest.approx(57.7, abs=0.5)
+    assert rec["eta_seconds"] == pytest.approx(5022, abs=60)
+
+
+def test_derive_year_vlm_running(tmp_path):
+    # 同一份日志、mtime 新鲜 → 进行中，不标失联。
+    d = tmp_path
+    _write_vlm_log(d, "year_vlm.log", range(106000, 106166),
+                   total=4995, prog=(100, 104))
+    rec = PROG.derive_year_progress(str(d))
+    assert rec["phase"] == "vlm" and rec["status"] == "running"
+    assert rec["stale"] is False
+    assert rec["done"] == 166 and rec["total"] == 4995
+
+
+def test_derive_year_vlm_done(tmp_path):
+    # VLM 跑满 4995/4995：阶段已完成，心跳停是自然结束，不标失联。
+    d = tmp_path
+    _write_vlm_log(d, "year_vlm.log", range(106000, 106000 + 4995),
+                   total=4995)
+    rec = PROG.derive_year_progress(str(d))
+    assert rec["phase"] == "vlm" and rec["status"] == "done"
+    assert rec["stale"] is False and rec["finished"] is True
+    assert rec["pct"] == 100.0 and rec["pending"] == 0
+
+
+def test_derive_year_vlm_resume_dedupes(tmp_path):
+    # 断点续跑：首轮 166 个 OK（106000–106165），续跑日志 50 个 OK
+    #（106156–106205，其中 10 个与首轮重叠）+ 1 条 api_error；
+    # done 按 OK rq id 去重 = 206，total 取两轮 "to process" 的最大值 4995
+    #（续跑的 4829 是剩余数，不能当阶段总数）；速率取最新日志的 "..." 行。
+    d = tmp_path
+    _write_vlm_log(d, "year_vlm.log", range(106000, 106166),
+                   total=4995, prog=(100, 104))
+    _write_vlm_log(d, "year_vlm_resume.log", range(106156, 106206),
+                   total=4829, prog=(50, 60), skipped=166, fail_ids=(999999,))
+    old = 1763887200
+    os.utime(d / "year_vlm.log", (old, old))
+    rec = PROG.derive_year_progress(str(d))
+    assert rec["phase"] == "vlm" and rec["status"] == "running"
+    assert rec["stale"] is False  # 续跑日志新鲜
+    assert rec["total"] == 4995 and rec["done"] == 206
+    assert rec["failed"] == 1 and rec["pending"] == 4788
+    assert rec["pct"] == pytest.approx(4.1, abs=0.1)
+    assert rec["rate_per_min"] == pytest.approx(50.0, abs=0.5)
+
+
+def test_derive_year_register_gap(tmp_path):
+    # register 已产出待看图清单（5 个 id）、VLM 尚未启动：阶段记 vlm、
+    # done 0；它还没开始跑，不存在“心跳中断”，stale 恒为 False。
+    d = tmp_path
+    (d / "year_vlm_rqids.txt").write_text(
+        "106116,106119,106120,106123,106124", encoding="utf-8")
+    rec = PROG.derive_year_progress(str(d))
+    assert rec["phase"] == "vlm" and rec["status"] == "running"
+    assert rec["stale"] is False
+    assert rec["total"] == 5 and rec["done"] == 0
+
+
 def test_derive_year_progress_subtracts_preexisting_lines(tmp_path):
     # 真实情况（2026-11-23 实测）：JSONL 在本轮开始前已有 500 行（上一轮
     # 断点续跑），直接数行数会把 done 算多 500、百分比破百。
