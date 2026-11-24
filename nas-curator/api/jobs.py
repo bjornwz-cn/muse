@@ -6,8 +6,9 @@
   完成后取新出现的最大 plan id 写入 job summary。
 - apply：默认走 curator.cmd_apply（plan_id 路径，执行全部 move/rename 项）。
   例外——统一收件箱模式（plan.library == 'inbox'）且设置 auto_apply 开启时，
-  只执行 action=move/rename 且 (confidence >= auto_threshold 或 auto_exempt)
-  的项：不满足的 plan_item 先置 skipped，再直接调 CE.apply_plan(过滤后项)
+  只执行 is_auto_apply_eligible 判定的项（confidence >= auto_threshold
+  且 kind 不是整目录 unit；auto_exempt 例外已废除，2026-11-24 计划 #160
+  修复）：不满足的 plan_item 先置 skipped，再直接调 CE.apply_plan(过滤后项)
   + 写 operations + 置 plan done，不走 cmd_apply（它按 action 取项、不看 status）。
 - rollback：后台线程调 curator.cmd_rollback。
 - 默认 use_llm/use_sem=false（规则层）：本机连不上 NAS 的模型端点；
@@ -26,6 +27,7 @@ from pydantic import BaseModel
 import curator as CUR
 from common import db as DB
 from common import guard, progress as PROG
+from common import routing as RT
 from .deps import get_db, get_db_path, get_settings, load_libraries
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
@@ -136,7 +138,9 @@ def _common_root(paths: list[str]) -> str:
 
 
 def _run_auto_apply(job_id: int, db_path: str, plan_id: int, threshold: float):
-    """收件箱 auto_apply 子集执行：只执行高置信 move/rename 项。"""
+    """收件箱 auto_apply 子集执行：只执行高置信（>= 阈值）且非整目录的
+    move/rename 项；整目录 unit 项与低置信项一律进复核（2026-11-24 计划
+    #160 修复，判定见 common.routing.is_auto_apply_eligible）。"""
     conn = DB.connect(db_path)
     try:
         DB.set_plan_status(conn, plan_id, "applying")
@@ -148,9 +152,7 @@ def _run_auto_apply(job_id: int, db_path: str, plan_id: int, threshold: float):
         for it in items:
             if it.get("action") not in ("move", "rename"):
                 continue
-            conf = it.get("confidence")
-            conf = float(conf) if conf is not None else 0.0
-            if conf >= threshold or it.get("auto_exempt"):
+            if RT.is_auto_apply_eligible(it, threshold):
                 todo.append(it)
             else:
                 # P4：与 CLI _apply_items 口径对齐——被拦下的低置信项只置 skipped

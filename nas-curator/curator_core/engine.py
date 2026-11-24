@@ -639,10 +639,13 @@ def _to_plan_item(row, root, min_score, rename, texts, mtimes, dst_root=None):
         "size": int(row.get("size") or 0), "ext": ext,
         "sha256": row.get("sha256") or "", "tags": tags,
         "review_kind": review_kind, "file_id": None,
-        # P2(P1.1)：score 补进 plan-item（plan CSV 的 score 列用）；
-        # auto_exempt：整目录 unit 行豁免自动执行阈值（结构性判定，不按单文件置信度拦）。
+        # P2(P1.1)：score 补进 plan-item（plan CSV 的 score 列用）。
+        # auto_exempt：2026-11-24 计划 #160 修复后恒为 False。原口径“整目录
+        # unit 行豁免自动执行阈值”已废除——0.4 置信度的 unit 项曾凭此豁免绕过
+        # 阈值与路径先验，整树搬走 21,933 个文件。unit 项是否可自动执行只由
+        # common.routing.is_auto_apply_eligible 判定（unit 永不自动执行）。
         "score": row.get("score") or 0,
-        "auto_exempt": bool(is_unit),
+        "auto_exempt": False,
     }
 
 

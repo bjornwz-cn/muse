@@ -92,15 +92,52 @@ def test_path_prior_guard():
               "auto_exempt": False}]
     out, info = RT.apply_path_prior_guard(items, ROOTS, 0.85)
     assert info["guarded"] == 0 and out[0]["action"] == "move"
-    # unit 整目录（auto_exempt）不拦
+    # unit 整目录：2026-11-24 计划 #160 修复后不再豁免——低置信跨顶层照样转复核
+    # （本例即 #160 原形：unit/project、置信度为空即 0、跨顶层到工作文件）
     items = [{"src": "/vol1/1000/下载/Wangzhen-Mac/项目",
               "dst": "/vol1/1000/工作文件/12-项目资料/项目",
               "action": "move", "category": "12-项目资料/项目",
               "confidence": "", "reason": "unit/project", "review_kind": None,
               "auto_exempt": True}]
     out, info = RT.apply_path_prior_guard(items, ROOTS, 0.85)
+    assert info["guarded"] == 1 and out[0]["action"] == "review"
+    assert out[0]["review_kind"] == "low_conf" and out[0]["dst"] == ""
+    # 高置信 unit 跨顶层：路径先验不拦（置信度够），但自动执行门控会拦（见
+    # test_apply_gating），此处只确认路径先验本身不因 unit 身份放行低置信项
+    items = [{"src": "/vol1/1000/下载/Wangzhen-Mac/项目",
+              "dst": "/vol1/1000/工作文件/12-项目资料/项目",
+              "action": "move", "category": "12-项目资料/项目",
+              "confidence": 0.9, "reason": "unit/project", "review_kind": None,
+              "auto_exempt": True}]
+    out, info = RT.apply_path_prior_guard(items, ROOTS, 0.85)
     assert info["guarded"] == 0 and out[0]["action"] == "move"
     print("path_prior_guard: PASS")
+
+
+def test_is_auto_apply_eligible():
+    """2026-11-24 计划 #160 回归：唯一自动执行判定入口。"""
+    E = RT.is_auto_apply_eligible
+    # 0.9 置信度普通文件：可自动执行
+    assert E({"action": "move", "kind": "document", "ext": ".txt",
+              "confidence": 0.9}, 0.85) is True
+    assert E({"action": "rename", "kind": "media", "ext": ".jpg",
+              "confidence": 0.85}, 0.85) is True
+    # 0.4 置信度普通文件：不可自动执行
+    assert E({"action": "move", "kind": "media", "ext": ".jpg",
+              "confidence": 0.4}, 0.85) is False
+    # 0.4 置信度 unit 整目录（#160 原形）：不可自动执行
+    assert E({"action": "move", "kind": "unit", "ext": "(目录)",
+              "confidence": 0.4, "auto_exempt": True}, 0.85) is False
+    # 0.9 置信度 unit 整目录：仍不可自动执行（unit 永不自动执行）
+    assert E({"action": "move", "kind": "unit", "ext": "(目录)",
+              "confidence": 0.9, "auto_exempt": True}, 0.85) is False
+    # auto_exempt 不再赋予资格：0.4 置信度文件即使标 auto_exempt 也不行
+    assert E({"action": "move", "kind": "document", "ext": ".txt",
+              "confidence": 0.4, "auto_exempt": True}, 0.85) is False
+    # 非 move/rename 动作：不可自动执行
+    assert E({"action": "review", "kind": "document", "ext": ".txt",
+              "confidence": 0.95}, 0.85) is False
+    print("is_auto_apply_eligible: PASS")
 
 
 def test_route_family_items_path_signal_and_work_subdir():

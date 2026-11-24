@@ -165,6 +165,9 @@ def test_plan_rules_only():
         assert unit_item["category"] == "11-程序与工具/myapp", unit_item
         assert unit_item["dst"] == os.path.join(root, "11-程序与工具/myapp")
         assert unit_item["size"] > 0
+        # 2026-11-24 计划 #160 修复：unit 项不再豁免（auto_exempt 恒 False），
+        # 是否自动执行只由 is_auto_apply_eligible 判定（unit 永不自动执行）
+        assert unit_item["auto_exempt"] is False, unit_item
         # 空壳进 shell 类目
         for name in ("空壳邮件.eml", "空文件.txt"):
             it = by_src(items, name)

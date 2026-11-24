@@ -235,10 +235,34 @@ def _conf_of(item):
         return 0.0
 
 
+def is_auto_apply_eligible(item, threshold=0.85):
+    """自动执行资格（2026-11-24 计划 #160 修复后口径，唯一判定入口）。
+
+    只有同时满足三条的项才能自动执行：
+      1. action 为 move/rename；
+      2. confidence >= threshold（默认 0.85）；
+      3. kind 不是 "unit"（整目录），ext 不是 "(目录)"。
+    整目录 unit 项永不自动执行（不论置信度），一律进复核；
+    低于阈值的项永不自动执行，对所有 kind 一视同仁。
+    auto_exempt 例外已废除：该字段不再赋予任何自动执行资格，任何分支
+    不得再以它绕过阈值（计划 #160：0.4 置信度的 unit 项凭 auto_exempt
+    绕过阈值与路径先验，整树搬走 21,933 个文件）。
+    CLI（curator._apply_items）与 Web API（api.jobs._run_auto_apply）
+    两处门控都必须调本函数，不得各自另写条件。
+    """
+    it = item or {}
+    if it.get("action") not in ("move", "rename"):
+        return False
+    if it.get("kind") == "unit" or it.get("ext") == "(目录)":
+        return False
+    return _conf_of(it) >= threshold
+
+
 def apply_path_prior_guard(items, roots, auto_threshold=0.85):
     """路径强信号后处理（0.1.2）：低置信建议不得跨顶层移动；只有高置信
     才能建议跨顶层。只改 items 里的建议（action/dst/category/reason），
-    不动任何文件；unit 整目录项（auto_exempt）是结构性判定，不拦。
+    不动任何文件。2026-11-24 计划 #160 修复：本守卫对所有项一视同仁，
+    整目录 unit 项不再豁免（原 auto_exempt 跳过已删除）。
 
     规则：move/rename 项，conf < auto_threshold，且 dst 顶层 != src 顶层
     （src/dst 顶层都能认出时）-> 转 review（dst 清空，review_kind=low_conf，
@@ -248,8 +272,6 @@ def apply_path_prior_guard(items, roots, auto_threshold=0.85):
     guarded = 0
     for it in items or []:
         if it.get("action") not in ("move", "rename"):
-            continue
-        if it.get("auto_exempt"):
             continue
         src, dst = it.get("src") or "", it.get("dst") or ""
         if not src or not dst:

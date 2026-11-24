@@ -822,9 +822,11 @@ def _apply_items(items, root, args, conn, plan_id):
     """执行 move/rename 项（process/inbox --apply 用）：写 operations、映射表、
     回滚脚本、报告三件套。默认不删除、不覆盖（同名 __n，见 apply_plan）。
 
-    自动执行门控（P3，与 Web API 的 auto_apply 子集口径一致）：只放行
-    confidence >= auto 阈值（默认 0.85，见 libraries.json thresholds.auto）
-    或 unit 行 auto_exempt 的项；被拦下的 move/rename 项不移动，改为写入
+    自动执行门控（P3，与 Web API 的 auto_apply 子集口径一致；2026-11-24
+    计划 #160 修复）：只放行 common.routing.is_auto_apply_eligible 判定的项
+    ——confidence >= auto 阈值（默认 0.85，见 libraries.json thresholds.auto）
+    且 kind 不是整目录 unit；整目录 unit 项永不自动执行，低于阈值的项永不
+    自动执行；auto_exempt 例外已废除。被拦下的 move/rename 项不移动，改为写入
     review_queue（kind=low_conf），出现在 Web 复核队列里等人工点。
     （背景：媒体引擎 score>=0.35 即出 move 项，低于统一自动执行阈值，
     不门控会把 0.40 置信的文件自动归位。）
@@ -833,11 +835,10 @@ def _apply_items(items, root, args, conn, plan_id):
     threshold = float((cfg.get("thresholds") or {}).get("auto", 0.85))
     todo = [i for i in items if i.get("action") in ("move", "rename")]
     todo = [i for i in todo if not guard.is_excluded(i.get("src") or "")[0]]
+    from common import routing as RT
     gated, held = [], []
     for i in todo:
-        conf = i.get("confidence")
-        conf = float(conf) if conf is not None else 0.0
-        if conf >= threshold or i.get("auto_exempt"):
+        if RT.is_auto_apply_eligible(i, threshold):
             gated.append(i)
         else:
             held.append(i)

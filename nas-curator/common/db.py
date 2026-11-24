@@ -25,7 +25,8 @@ def init_db(path: str | None = None) -> str:
     try:
         with open(SCHEMA_PATH, encoding="utf-8") as f:
             conn.executescript(f.read())
-        # 迁移：P1 建的旧库补 auto_exempt 列（P2，unit 豁免自动执行阈值用）
+        # 迁移：P1 建的旧库补 auto_exempt 列（P2 曾作 unit 豁免自动执行阈值用；
+        # 2026-11-24 计划 #160 修复后该豁免已废除，列仅保留作历史记录，新行恒为 0）
         cols = [r[1] for r in conn.execute("PRAGMA table_info(plan_items)")]
         if "auto_exempt" not in cols:
             conn.execute("ALTER TABLE plan_items "

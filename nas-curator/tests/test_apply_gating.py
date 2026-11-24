@@ -2,8 +2,10 @@
 # -*- coding: utf-8 -*-
 """P3：inbox/process --apply 的自动执行门控测试。
 
-门控口径（与 Web API auto_apply 子集一致）：只放行 confidence >= auto 阈值
-（默认 0.85）或 auto_exempt 的 move/rename 项；被拦下的项不移动，
+门控口径（与 Web API auto_apply 子集一致；2026-11-24 计划 #160 修复）：
+只放行 common.routing.is_auto_apply_eligible 判定的项——confidence >= auto
+阈值（默认 0.85）且 kind 不是整目录 unit；整目录 unit 项永不自动执行，
+低于阈值的项永不自动执行；auto_exempt 例外已废除。被拦下的项不移动，
 改为写入 review_queue（kind=low_conf），出现在 Web 复核队列里。
 背景：媒体引擎 score>=0.35 即出 move 项，不门控会把 0.40 置信的文件自动归位。
 只用 tmp 目录与临时 DB，不碰 NAS。
@@ -131,4 +133,106 @@ def test_run_auto_apply_writes_review_queue(tmp_path):
     assert reviews[0]["payload"]["confidence"] == 0.42
     job = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
     assert job["status"] == "done"
+    conn.close()
+
+
+def _unit_item(src_dir, dst_dir, conf, name="媒体库"):
+    """2026-11-24 计划 #160 原形：整目录 unit 项。"""
+    src = src_dir / name
+    src.mkdir(exist_ok=True)
+    (src / "a.jpg").write_text("x", encoding="utf-8")
+    (src / "b.jpg").write_text("y", encoding="utf-8")
+    return {"src": str(src), "dst": str(dst_dir / name), "new_name": name,
+            "category": "12-项目资料/媒体库", "confidence": conf,
+            "reason": "unit/project", "evidence": "文件 2 + 子目录 0",
+            "action": "move", "kind": "unit", "size": 2, "ext": "(目录)",
+            "sha256": "", "tags": [], "review_kind": None,
+            "score": 0, "auto_exempt": True}
+
+
+def test_apply_items_blocks_low_conf_unit_160_regression(tmp_path):
+    """2026-11-24 计划 #160 回归：0.4 置信度 unit 整目录不得自动执行，
+    即使标了 auto_exempt（旧豁免已废除）。"""
+    src_dir = tmp_path / "src"
+    dst_dir = tmp_path / "dst"
+    src_dir.mkdir()
+    dst_dir.mkdir()
+    unit = _unit_item(src_dir, dst_dir, 0.4)
+    db = str(tmp_path / "t.db")
+    conn = DB.connect(db)
+    DB.init_db(db)
+    plan_id = DB.create_plan(conn, "inbox", None, {"n": 1, "move": 1, "review": 0})
+    CUR._apply_items([unit], str(src_dir), _args(str(tmp_path), db), conn, plan_id)
+    # 整目录原地不动，目标位置没有出现
+    assert os.path.isdir(unit["src"])
+    assert not os.path.exists(unit["dst"])
+    # 进了复核队列（kind=low_conf），人工可点
+    reviews = DB.list_review(conn, status="pending")
+    assert len(reviews) == 1
+    assert reviews[0]["kind"] == "low_conf"
+    assert reviews[0]["payload"]["src"] == unit["src"]
+    assert reviews[0]["payload"]["confidence"] == 0.4
+    conn.close()
+
+
+def test_apply_items_blocks_unit_even_when_high_confidence(tmp_path):
+    """整目录 unit 项永不自动执行——即使置信度 0.9 也不行，一律进复核。"""
+    src_dir = tmp_path / "src"
+    dst_dir = tmp_path / "dst"
+    src_dir.mkdir()
+    dst_dir.mkdir()
+    unit = _unit_item(src_dir, dst_dir, 0.9)
+    db = str(tmp_path / "t.db")
+    conn = DB.connect(db)
+    DB.init_db(db)
+    plan_id = DB.create_plan(conn, "inbox", None, {"n": 1, "move": 1, "review": 0})
+    CUR._apply_items([unit], str(src_dir), _args(str(tmp_path), db), conn, plan_id)
+    assert os.path.isdir(unit["src"])
+    assert not os.path.exists(unit["dst"])
+    reviews = DB.list_review(conn, status="pending")
+    assert len(reviews) == 1
+    assert reviews[0]["kind"] == "low_conf"
+    conn.close()
+
+
+def test_run_auto_apply_blocks_unit(tmp_path):
+    """Web API _run_auto_apply 同口径：unit 整目录不得自动执行。"""
+    src_dir = tmp_path / "src"
+    dst_dir = tmp_path / "dst"
+    src_dir.mkdir()
+    dst_dir.mkdir()
+    unit = _unit_item(src_dir, dst_dir, 0.9)
+    hi = src_dir / "high.txt"
+    hi.write_text("高置信文件", encoding="utf-8")
+    db = str(tmp_path / "t.db")
+    conn = DB.connect(db)
+    DB.init_db(db)
+    plan_id = DB.create_plan(conn, "inbox", None, {"n": 2, "move": 2, "review": 0})
+    for item in ({"src": str(hi), "dst": str(dst_dir / "high.txt"),
+                  "new_name": "high.txt", "category": "01-合同与协议",
+                  "confidence": 0.95, "reason": "rule", "evidence": "",
+                  "action": "move", "kind": "document", "size": 10,
+                  "ext": ".txt", "sha256": "", "tags": [], "review_kind": None,
+                  "score": 12, "auto_exempt": False}, unit):
+        DB.add_plan_item(conn, plan_id, item)
+    job_id = DB.create_job(conn, "apply")
+    conn.close()
+
+    from api import jobs as JOBS  # noqa: E402 - 懒加载，见文件头说明
+    JOBS._run_auto_apply(job_id, db, plan_id, 0.85)
+
+    # 高置信普通文件：已移动；高置信 unit：原地不动
+    assert not hi.exists()
+    assert (dst_dir / "high.txt").exists()
+    assert os.path.isdir(unit["src"])
+    assert not os.path.exists(unit["dst"])
+    conn = DB.connect(db)
+    items = DB.list_plan_items(conn, plan_id)
+    by_src = {i["src_path"]: i for i in items}
+    assert by_src[str(hi)]["status"] == "done"
+    assert by_src[unit["src"]]["status"] == "skipped"
+    reviews = DB.list_review(conn, status="pending")
+    assert len(reviews) == 1
+    assert reviews[0]["kind"] == "low_conf"
+    assert reviews[0]["payload"]["src"] == unit["src"]
     conn.close()

@@ -5,11 +5,14 @@
     python3 /app/summarize_repair.py --db /data/nas-curator.db --since 2026-11-19T03:52:00
 
 只读：只查 plans/plan_items，不移动、不改任何文件。
-分流口径与 apply 门控一致（curator.py _apply_items / api/jobs.py _run_auto_apply）：
-    auto   = action in (move, rename) 且 (confidence >= 0.85 或 auto_exempt=1)
-    review = 其余 move/rename 项（低置信、非豁免）或 action=review
+分流口径与 apply 门控一致（curator.py _apply_items / api/jobs.py _run_auto_apply，
+即 common.routing.is_auto_apply_eligible）：
+    auto   = action in (move, rename) 且 confidence >= 0.85 且 kind 不是 unit
+             （整目录 unit 项永不自动执行；auto_exempt 例外已废除，2026-11-24
+             计划 #160 修复）
+    review = 其余 move/rename 项（低置信、整目录）或 action=review
     skip   = action=skip
-覆盖文件数：文件项计 1；单元项（auto_exempt=1）计其 src 目录下实际文件数（find 计数）。
+覆盖文件数：文件项计 1；单元项（kind=unit）计其 src 目录下实际文件数（find 计数）。
 """
 import argparse
 import json
@@ -46,7 +49,7 @@ def summarize(db, since):
     for p in plans:
         pid = p["id"]
         items = conn.execute(
-            "SELECT src_path, category, action, confidence, auto_exempt, size "
+            "SELECT src_path, category, action, confidence, auto_exempt, kind, ext, size "
             "FROM plan_items WHERE plan_id=?", (pid,)).fetchall()
         n = len(items)
         auto = review = skip = 0
@@ -61,11 +64,12 @@ def summarize(db, since):
                 skip += 1
                 continue
             if a in ("move", "rename") and (
-                    (it["confidence"] or 0) >= AUTO_CONF or it["auto_exempt"]):
+                    (it["confidence"] or 0) >= AUTO_CONF
+                    and it["kind"] != "unit" and it["ext"] != "(目录)"):
                 auto += 1
             else:
                 review += 1
-            files_covered += _files_under(it["src_path"]) if it["auto_exempt"] else 1
+            files_covered += _files_under(it["src_path"]) if it["kind"] == "unit" else 1
         s = json.loads(p["summary"]) if p["summary"] else {}
         out.append({
             "plan_id": pid, "library": p["library"],
