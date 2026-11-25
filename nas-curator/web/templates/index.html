@@ -167,9 +167,36 @@
     }
   }
 
-  async function load() {
+  /* 0.2.2：用同一次 /api/dashboard 响应更新顶部导航徽标（待复核数）与版本号，
+     不再另发一次请求；此前徽标只在页面加载时刷一次（app.js refreshReviewBadge）。 */
+  function updateNavFromDashboard(d) {
+    var badge = document.getElementById('review-badge');
+    if (badge) {
+      var n = Number(d.review_pending) || 0;
+      badge.textContent = n;
+      badge.hidden = n <= 0;
+    }
+    var ver = document.getElementById('nav-version');
+    if (ver && d.version) ver.textContent = '当前版本 ' + d.version;
+  }
+
+  /* 0.2.2：总览数据签名，只取用户看得见的状态字段（计数、任务 id/状态/结束时间），
+     不含 elapsed_s/eta 等每轮都变的易变字段，否则每次轮询都会触发 DOM 重写。 */
+  function dashSig(d) {
+    var libs = (d.libraries || []).map(function (l) { return [l.id, l.files, l.bytes, l.review_pending]; });
+    var jobs = (d.jobs_recent || []).map(function (j) { return [j.id, j.status, j.finished_at]; });
+    return JSON.stringify([d.review_pending, d.today_new, d.dup_reclaimable, libs, jobs, d.version]);
+  }
+
+  var lastDashSig = '';
+  async function load(isRefresh) {
     try {
       var d = await C.api('/api/dashboard');
+      updateNavFromDashboard(d);
+      /* 0.2.2：签名未变跳过 DOM 重写，避免 5 秒轮询造成闪烁。 */
+      var sig = dashSig(d);
+      if (isRefresh && sig === lastDashSig) return;
+      lastDashSig = sig;
       document.getElementById('app-version').textContent = d.version ? ('当前版本 ' + d.version) : '';
       var cards = (d.libraries || []).map(function (lib) {
         return '<div class="card"><h3>' + C.esc(lib.name) + '</h3>' +
@@ -192,14 +219,20 @@
       }).join('');
       document.getElementById('jobs-body').innerHTML = rows || '<tr><td colspan="6" class="muted">暂无任务</td></tr>';
     } catch (e) {
-      C.showError(document.getElementById('dash-error'), e);
-      document.getElementById('library-cards').innerHTML = '';
+      if (!isRefresh) {
+        C.showError(document.getElementById('dash-error'), e);
+        document.getElementById('library-cards').innerHTML = '';
+      }
+      /* 轮询失败保持上一次内容，不阻塞页面（与 loadRunning 同口径）。 */
     }
   }
   load();
   loadUpgrade();
   loadRunning();
-  setInterval(loadRunning, 5000);  /* 0.2.0：进行中任务每 5 秒刷新 */
+  /* 0.2.2：总览卡片（库/待复核/今日新增/重复可回收/最近任务）与进行中任务同用 5 秒轮询。
+     此前 load() 只在页面加载时跑一次，后台处理完文件后卡片一直停在旧数，
+     进行中任务消失后用户也看不到新数——即本次反馈的 bug。 */
+  setInterval(function () { load(true); loadRunning(); }, 5000);
 })();
 </script>
 {% endblock %}
