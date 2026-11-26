@@ -52,7 +52,7 @@ def test_nav_version_data_source(client):
     c, _, _ = client
     r = c.get("/api/dashboard")
     assert r.status_code == 200, r.text
-    assert r.json().get("version") == "0.2.0"
+    assert r.json().get("version") == "0.2.2"
 
 
 def _seed_check(upgrade_dir, current, latest):
@@ -70,11 +70,11 @@ def test_nav_update_hint_when_newer_available(client):
     """有新版本时 /api/upgrade/check 给出 latest + update_available=True
    （前端据此在版本号旁显示“有新版 X”，点进总览页升级）。"""
     c, _, upgrade_dir = client
-    _seed_check(upgrade_dir, "0.2.0", "0.2.1")
+    _seed_check(upgrade_dir, "0.2.2", "0.2.3")
     r = c.get("/api/upgrade/check")
     assert r.status_code == 200, r.text
     d = r.json()
-    assert d["latest"] == "0.2.1" and d["update_available"] is True
+    assert d["latest"] == "0.2.3" and d["update_available"] is True
 
 
 def test_nav_update_hint_hidden_when_latest(client):

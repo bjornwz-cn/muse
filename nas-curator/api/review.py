@@ -256,6 +256,15 @@ def decide_one(conn, review_id: int, decision: str, body: DecideBody | None = No
         except ValueError:
             payload = {}
     DB.decide_review(conn, review_id, decision, decided_by="user")
+    # v0.2.2 自学习：记决策留痕（预测 vs 用户最终判定）；学习失败不影响裁定。
+    try:
+        from common import learn as _learn
+        _learn.record_review_decision(
+            conn, review, payload, decision,
+            final_category=(body.category if body and body.category else ""),
+            final_dst=(body.suggested_dst if body and body.suggested_dst else ""))
+    except Exception:
+        pass
     if decision == "rejected":
         return {"ok": True, "id": review_id, "moved": False, "note": "已驳回，仅更新状态"}
 

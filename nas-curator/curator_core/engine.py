@@ -657,7 +657,7 @@ def plan_files(root, rules, *, llm=None, sem=None, prescreener=None, rename=Fals
                no_ocr=False, max_chars=2000, ocr_timeout=90, llm_min_conf=0.55,
                llm_max=2000, llm_all=False, llm_chunk=8, llm_timeout=240,
                strong=12, name_template="{date}_{title}", deep=False,
-               digest=None, db_conn=None, dst_root=None):
+               digest=None, db_conn=None, dst_root=None, learn_conn=None):
     """生成统一 plan-item 列表。返回 (items, stats)。
 
     rules 接受 dict 或 JSON 文件路径；llm/sem/prescreener 接受已建好的
@@ -680,6 +680,17 @@ def plan_files(root, rules, *, llm=None, sem=None, prescreener=None, rename=Fals
         default_cat.split("/")[0], shell_cat.split("/")[0],
         low_cat.split("/")[0], enc_cat.split("/")[0]}
     whitelist = rules.get("categories_whitelist") or []
+
+    # v0.2.2 自学习：learn_conn 传入时建 LearnContext（只读规则快照），
+    # 在 best_category 之后追加 learned-boost；不传时行为与原来一致。
+    # best_category 本体不动；whitelist 与路径先验守卫仍在之后生效。
+    learn_ctx = None
+    if learn_conn is not None:
+        try:
+            from common import learn as _learn
+            learn_ctx = _learn.LearnContext(learn_conn)
+        except Exception:
+            learn_ctx = None
 
     llm_quota = [max(0, llm_max)]
     llm_calls = [0]
@@ -827,6 +838,10 @@ def plan_files(root, rules, *, llm=None, sem=None, prescreener=None, rename=Fals
                 utarget = TK.sanitize(ut, 40)
         cat, sc, reason, ev = best_category(os.path.basename(u["path"]), body, "",
                                             cats, min_score, 3, "", "")
+        if learn_ctx is not None and cat:
+            # v0.2.2 自学习：目录名命中学到的规则时提分（只对有类目的目录生效）。
+            cat, sc, reason, _lrn = learn_ctx.boost_doc(
+                u["path"], os.path.basename(u["path"]), body, "", cat, sc, reason)
         if not cat:
             cat = "06-其他/" + ("程序与工具" if u["kind"] in ("program", "code", "repo") else "项目归档")
             reason = f"unit:{u['kind']}"
@@ -921,6 +936,10 @@ def plan_files(root, rules, *, llm=None, sem=None, prescreener=None, rename=Fals
         w_body = 4 if (content_first or len(body) >= 120) else (3 if len(body) >= 30 else 2)
         cat, sc, reason, ev = best_category(name, body, ext, cats, min_score,
                                             w_body, default_cat, low_cat, name_first=True)
+        if learn_ctx is not None:
+            # v0.2.2 自学习：学到的规则提分（在 whitelist 检查之前，whitelist 仍校验提分后的目标）。
+            cat, sc, reason, _lrn = learn_ctx.boost_doc(
+                p, os.path.basename(p), body, ext, cat, sc, reason)
         conf = ""
         if whitelist and cat.split("/")[0] not in whitelist:
             cat, reason = default_cat, "whitelist-miss"

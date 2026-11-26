@@ -116,6 +116,13 @@ def clean_text(s: str) -> str:
     return s.strip()
 
 
+def _strip_tags(t: str) -> str:
+    """去 XML/HTML 标签（SpreadsheetML 抽取用，与批处理脚本同口径）。"""
+    t = re.sub(r"<[^>]+>", " ", t)
+    t = re.sub(r"\s+", " ", t)
+    return t.strip()
+
+
 def good_lines(text: str, limit=40):
     """挑出有信息量的行（去页码/页眉/空行）。"""
     out = []
@@ -342,6 +349,22 @@ def extract_text(path, ext=None, max_chars=3000, ocr_url=None,
         return t, ("ooxml" if t else "empty")
 
     if ext in OLE_EXT:
+        # v0.2.2 自学习（xls-header 种子规则）：先嗅探文件头；XML 内容是
+        # SpreadsheetML，走 strip-tags，不调 xls2csv（会失败、文件被误判损坏）。
+        # 2026-11-25 批教训：500MB/335MB 销售订单大表就是 SpreadsheetML。
+        if ext in (".xls", ".doc", ".ppt"):
+            try:
+                with open(path, "rb") as f:
+                    head = f.read(4096)
+            except OSError:
+                head = b""
+            if head[:200].lstrip().startswith((b"<?xml", b"<")):
+                try:
+                    raw = open(path, "rb").read(1 << 21).decode(errors="replace")
+                except OSError:
+                    raw = ""
+                t = clean_text(_strip_tags(raw))[:max_chars]
+                return t, ("spreadsheetml" if t else "empty")
         tool = {".doc": "catdoc", ".xls": "xls2csv", ".ppt": "catppt"}[ext]
         t = clean_text(run_cmd([tool, path], timeout=60))[:max_chars]
         return t, (tool if t else "empty")

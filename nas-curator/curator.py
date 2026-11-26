@@ -178,7 +178,8 @@ def _apply_path_guard(items, cfg):
     return items
 
 
-def _dispatch_plan(root, kind, rules, llm, sem, prescreener, args, cfg):
+def _dispatch_plan(root, kind, rules, llm, sem, prescreener, args, cfg,
+                   learn_conn=None):
     """按 kind 把 root 交给对应引擎，返回 (items, stats)。
 
     document：文档引擎，dst 落在 root 内（库内整理）。
@@ -186,6 +187,7 @@ def _dispatch_plan(root, kind, rules, llm, sem, prescreener, args, cfg):
     mixed（统一收件箱 / 笔记本备份等输入源）：文档走文档引擎，dst_root=工作库；
     照片视频走媒体引擎，dst=媒体库；文档引擎产出的 kind=media 项丢弃（媒体引擎覆盖）。
     已知局限（P1）：文档默认归工作库；家庭 vs 工作的分流需家庭规则，P2 再做。
+    learn_conn：v0.2.2 自学习——传入 DB 连接时启用学到的规则提分；不传则关闭。
     """
     if kind == "media":
         from media_core import engine as ME
@@ -193,7 +195,7 @@ def _dispatch_plan(root, kind, rules, llm, sem, prescreener, args, cfg):
         mcfg.setdefault("library_root", root)
         paths = _collect_media_paths(root)
         items, stats = ME.plan_media_files(paths, mcfg, classifier=classifier,
-                                           library_root=root)
+                                           library_root=root, learn_conn=learn_conn)
         return _apply_path_guard(items, cfg), stats
     from curator_core import engine as CE
     if rules is None:
@@ -210,7 +212,7 @@ def _dispatch_plan(root, kind, rules, llm, sem, prescreener, args, cfg):
         no_ocr=args.no_ocr, max_chars=args.max_chars,
         ocr_timeout=args.ocr_timeout, llm_min_conf=args.llm_min_conf,
         llm_max=args.llm_max, dst_root=dst_root or None,
-        deep=getattr(args, "deep", False))
+        deep=getattr(args, "deep", False), learn_conn=learn_conn)
     if kind == "mixed":
         from media_core import engine as ME
         # P2(P1.1)：家庭 vs 工作分流（文档项按启发式改写 dst 到家庭库/人名）。
@@ -221,7 +223,8 @@ def _dispatch_plan(root, kind, rules, llm, sem, prescreener, args, cfg):
         classifier, mcfg = _build_media_classifier(args)
         mpaths = _collect_media_paths(root)
         mitems, mstats = ME.plan_media_files(mpaths, mcfg, classifier=classifier,
-                                             library_root=media_root)
+                                             library_root=media_root,
+                                             learn_conn=learn_conn)
         stats = dict(stats)
         stats["media"] = mstats
         if dropped:
@@ -392,7 +395,7 @@ def cmd_plan(args):
         rules = _load_plan_rules(args)
         llm, sem, prescreener = _setup_models(args, rules)
         items, stats = _dispatch_plan(args.root, kind, rules, llm, sem, prescreener,
-                                      args, cfg)
+                                      args, cfg, learn_conn=conn)
         # 排除过滤：逐条 src 再过一次 guard（纵深防御）
         kept = []
         for it in items:
@@ -505,6 +508,67 @@ def cmd_learn(args):
     return 0
 
 
+def cmd_selflearn(args):
+    """自学习管理（v0.2.2）：在线纠正学习——decision_log → learned_rules。
+
+    与旧 `learn`（从已整理目录反推类目体系，离线批量）不同：
+    learn：消费未处理的 decision_log，提炼/强化/降级规则。
+    rules：列出学到的规则（默认只列 active，--all 列全部含已禁用）。
+    disable/enable：单独禁用/启用一条规则（记 learn_events）。
+    seed：录入 2026-11-25 批处理教训的种子规则（幂等）。
+    注意：--llm 时 LLM 提议只在确定性提炼无强信号时调用，模型走
+    common.learn.get_selflearn_llm（默认 NAS 本地 qwen3:4b，可用
+    CURATOR_SELFLEARN_MODEL 环境变量覆盖）。
+    """
+    from common import learn as _learn
+    conn = DB.connect(args.db)
+    DB.init_db(args.db)
+    action = args.action
+    if action == "learn":
+        llm = _learn.get_selflearn_llm() if args.llm else None
+        known = None
+        if getattr(args, "rules", ""):
+            rules = _load_rules(args.rules)
+            known = [c.get("path") for c in rules.get("categories", [])]
+            for extra in ("default", "low_conf_category", "shell_category",
+                          "sensitive_category", "dup_category"):
+                if rules.get(extra):
+                    known.append(rules[extra])
+        stats = _learn.learn_from_decisions(conn, known_categories=known,
+                                            use_llm=args.llm, llm=llm)
+        print("决策 %(decisions)d 条，其中纠正 %(corrections)d、确认 %(confirmations)d；"
+              "新建规则 %(rules_created)d、强化 %(rules_strengthened)d、"
+              "降级 %(rules_degraded)d、LLM 提议 %(llm_proposed)d、跳过 %(skipped)d"
+              % stats)
+        return 0
+    if action == "seed":
+        added, existed = _learn.seed_batch_lessons(conn)
+        print(f"录入种子规则：新增 {added} 条，已有 {existed} 条（幂等）")
+        return 0
+    if action == "rules":
+        rows = _learn.list_rules(conn, status="" if args.all else "active")
+        if not rows:
+            print("暂无学到的规则")
+            return 0
+        print(f"{'id':>4}  {'kind':<18} {'pattern':<24} {'target':<28} "
+              f"{'conf':>5} {'确认':>4}  {'status':<8}  source")
+        for r in rows:
+            print(f"{r['id']:>4}  {r['kind']:<18} {(r['pattern'] or '')[:24]:<24} "
+                  f"{(r['target'] or '')[:28]:<28} {float(r['confidence']):>5.2f} "
+                  f"{int(r['confirmations'] or 0):>4}  {r['status']:<8}  {r['source'] or ''}")
+        return 0
+    if action in ("disable", "enable"):
+        if not args.rule_id:
+            raise SystemExit("disable/enable 需要 --rule-id")
+        if action == "disable":
+            _learn.disable_rule(conn, args.rule_id, reason="manual:cli")
+        else:
+            _learn.enable_rule(conn, args.rule_id, reason="manual:cli")
+        print(f"规则 #{args.rule_id} → {action}d")
+        return 0
+    raise SystemExit(f"未知 selflearn 动作：{action}")
+
+
 def _collect_media_paths(root):
     """收集 root 下的照片/视频文件，跳过 _Review（已复核区）与隐藏目录。
 
@@ -567,6 +631,12 @@ def cmd_apply(args):
             for op in operations:
                 DB.add_operation(conn, plan_id, op["src_path"], op["dst_path"],
                                  op.get("sha256"))
+            # v0.2.2 自学习：记决策留痕（预测 vs 实际去向）；学习失败不影响执行。
+            try:
+                from common import learn as _learn
+                _learn.record_applied_operations(conn, items, operations)
+            except Exception:
+                pass
             if args.map:
                 _write_map_tsv(operations, args.map)
                 from common import rollback as RB
@@ -687,8 +757,23 @@ def cmd_review(args):
     if args.action == "decide":
         if not args.review_id or not args.decision:
             raise SystemExit("decide 需要 --review-id 与 --decision approved|rejected")
+        row = conn.execute("SELECT * FROM review_queue WHERE id=?",
+                           (args.review_id,)).fetchone()
+        payload = {}
+        if row is not None and row["payload"]:
+            try:
+                payload = json.loads(row["payload"])
+            except ValueError:
+                payload = {}
         DB.decide_review(conn, args.review_id, args.decision,
                          decided_by=args.by or "user")
+        # v0.2.2 自学习：记决策留痕；学习失败不影响裁定。
+        try:
+            from common import learn as _learn
+            _learn.record_review_decision(conn, dict(row) if row else {},
+                                          payload, args.decision)
+        except Exception:
+            pass
         print(f"复核 #{args.review_id} → {args.decision}")
         return 0
     raise SystemExit("review 子命令：list | decide")
@@ -747,12 +832,21 @@ def _plan_single_file(path, args, cfg, db_conn=None):
         media_root = _library_root(cfg, "media", "")
         classifier, mcfg = _build_media_classifier(args)
         return ME.plan_media_files([path], mcfg, classifier=classifier,
-                                   library_root=media_root)
+                                   library_root=media_root,
+                                   learn_conn=db_conn)
     from curator_core import engine as CE
     from curator_core import extract_text as _extract_text
     rules = _load_plan_rules(args)
     if rules is None:
         raise SystemExit("文档处理需要 --rules（规则文件）")
+    # v0.2.2 自学习：db_conn 传入时建 LearnContext（只读规则快照）。
+    learn_ctx = None
+    if db_conn is not None:
+        try:
+            from common import learn as _learn
+            learn_ctx = _learn.LearnContext(db_conn)
+        except Exception:
+            learn_ctx = None
     work_root = _library_root(cfg, "work", "")
     cats = rules.get("categories", [])
     low_cat = rules.get("low_conf_category", "99-待确认/04-低置信")
@@ -794,11 +888,17 @@ def _plan_single_file(path, args, cfg, db_conn=None):
                 cat, sc, reason, ev = CE.best_category(
                     name, body, ext, cats, args.min_score, 3,
                     default_cat, low_cat, name_first=True)
+                if learn_ctx is not None:
+                    cat, sc, reason, _lrn = learn_ctx.boost_doc(
+                        path, name, body, ext, cat, sc, reason)
                 row.update(category=cat, score=sc, reason=reason, evidence=ev or "")
         else:
             cat, sc, reason, ev = CE.best_category(
                 name, body, ext, cats, args.min_score, 3,
                 default_cat, low_cat, name_first=True)
+            if learn_ctx is not None:
+                cat, sc, reason, _lrn = learn_ctx.boost_doc(
+                    path, name, body, ext, cat, sc, reason)
             row.update(category=cat, score=sc, reason=reason, evidence=ev or "")
     item = CE._to_plan_item(row, os.path.dirname(path), args.min_score, False,
                             {path: body}, {path: st.st_mtime}, dst_root=work_root)
@@ -864,6 +964,12 @@ def _apply_items(items, root, args, conn, plan_id):
         for op in operations:
             DB.add_operation(conn, plan_id, op["src_path"], op["dst_path"],
                              op.get("sha256"))
+        # v0.2.2 自学习：记决策留痕（预测 vs 实际去向）；学习失败不影响执行。
+        try:
+            from common import learn as _learn
+            _learn.record_applied_operations(conn, todo, operations)
+        except Exception:
+            pass
         if args.map:
             _write_map_tsv(operations, args.map)
             from common import rollback as RB
@@ -932,7 +1038,7 @@ def cmd_inbox(args):
             # 收件箱按定义就是混合输入源（文档→工作库、媒体→媒体库），不按路径解析
             llm = _setup_llm(args)
             items, stats = _dispatch_plan(inbox_path, "mixed", rules, llm, sem,
-                                          prescreener, a2, cfg)
+                                          prescreener, a2, cfg, learn_conn=conn)
             kept = []
             for it in items:
                 bad, _ = guard.is_excluded(it.get("src") or "")
@@ -1010,7 +1116,7 @@ def cmd_process(args):
                 # 库外任意目录：按混合输入源处理，归位 dst 落对应库（工作/媒体）
                 kind = "mixed"
             items, stats = _dispatch_plan(p, kind, rules, llm, sem,
-                                          prescreener, a2, cfg)
+                                          prescreener, a2, cfg, learn_conn=conn)
             roots.append(p)
         elif os.path.isfile(p):
             items, stats = _plan_single_file(p, args, cfg, db_conn=conn)
@@ -1109,6 +1215,18 @@ def build_parser():
     pl.add_argument("--per-cat", type=int, default=6)
     pl.add_argument("--topk", type=int, default=10)
     pl.set_defaults(func=cmd_learn)
+
+    ps = sub.add_parser("selflearn", help="自学习：纠正学习 / 规则管理 / 种子规则")
+    ps.add_argument("action", choices=["learn", "rules", "disable", "enable", "seed"],
+                    help="learn=消费决策留痕提炼规则；rules=列规则；"
+                         "disable/enable=禁用/启用一条规则；seed=录入种子规则")
+    ps.add_argument("--rule-id", type=int, default=0)
+    ps.add_argument("--all", action="store_true", help="rules 时列出全部（含已禁用）")
+    ps.add_argument("--llm", action="store_true",
+                    help="learn 时允许 LLM 提议规则（默认只做确定性提炼）")
+    ps.add_argument("--rules", default="",
+                    help="learn 时校验目标类目的规则文件（不给则不校验目标）")
+    ps.set_defaults(func=cmd_selflearn)
 
     p2 = sub.add_parser("plan", help="生成分类/命名计划（只读，写 DB + CSV）")
     p2.add_argument("--root", required=True)

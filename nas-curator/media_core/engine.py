@@ -175,13 +175,45 @@ def _review_item(base, category, confidence, reason, evidence, review_kind, kind
     return base
 
 
-def _classify_video_frames(classifier, frames, row, cfg):
+def _apply_media_boost(sc, learn_ctx, name):
+    """v0.2.2 自学习：学到的 media_filename 规则给匹配类目加分。
+
+    只加在 SigLIP/ChineseCLIP 分数上（decide 本体不动）；加分后重算
+    sig_top/sig_2。返回 (sc, fired_rule_ids)。
+    """
+    if learn_ctx is None or not sc:
+        return sc, []
+    boosts = learn_ctx.media_boosts(name)
+    if not boosts:
+        return sc, []
+    fired = []
+    for rule_id, target, boost in boosts:
+        for key in ("sig", "zh"):
+            d = sc.get(key) or {}
+            if target in d:
+                try:
+                    d[target] = min(1.0, float(d[target]) + boost)
+                except (TypeError, ValueError):
+                    pass
+        fired.append(rule_id)
+    try:
+        ts = sorted(sc["sig"].items(), key=lambda kv: -kv[1])
+        sc["sig_top"] = ts[0]
+        sc["sig_2"] = ts[1]
+    except Exception:
+        pass
+    return sc, fired
+
+
+def _classify_video_frames(classifier, frames, row, cfg, learn_ctx=None, name="",
+                           fired_out=None):
     """视频多帧分类：每帧走同一套图片分类（scores + decide），取众数投票。
 
     每帧先算自身 blur/white/colors/ar 再调 decide（与照片同一套判定）。
     只统计 why == 'accepted' 的帧；票数最多者胜，票数相同取首帧结果；
     无一帧 accepted 时返回首帧的判定（一般为 low_confidence）。
     返回 (cat, cat2, s1, s2, why)，口径与 decide() 一致。
+    fired_out 传入列表时，把起作用的自学习规则 id（去重）追加进去。
     """
     results = []
     for img in frames:
@@ -195,6 +227,12 @@ def _classify_video_frames(classifier, frames, row, cfg):
         except Exception:
             results.append(("待确认", "待确认", 0.0, 0.0, "decode_failed"))
             continue
+        # v0.2.2 自学习：每帧打分后给匹配类目加分（decide 本体不动）。
+        sc, _fired = _apply_media_boost(sc, learn_ctx, name)
+        if _fired and fired_out is not None:
+            for _rid in _fired:
+                if _rid not in fired_out:
+                    fired_out.append(_rid)
         results.append(decide(row, sc, blur, white, colors, ar, "", cfg))
     if not results:
         return "待确认", "待确认", 0.0, 0.0, "decode_failed"
@@ -210,7 +248,8 @@ def _classify_video_frames(classifier, frames, row, cfg):
     return first_res
 
 
-def plan_media_files(paths, cfg, *, classifier=None, index=None, library_root=None):
+def plan_media_files(paths, cfg, *, classifier=None, index=None, library_root=None,
+                     learn_conn=None):
     """规划一批媒体文件：返回 (items, stats)。
 
     paths：待处理文件绝对路径列表；cfg：config.json 同结构 dict；
@@ -228,6 +267,16 @@ def plan_media_files(paths, cfg, *, classifier=None, index=None, library_root=No
     eff = _effective_cfg(cfg)
     th = eff["thresholds"]
     lib_root = library_root or eff.get("library_root") or ""
+
+    # v0.2.2 自学习：learn_conn 传入时建 LearnContext（只读规则快照）；
+    # 不传时行为与原来一致。decide() 本体不动。
+    learn_ctx = None
+    if learn_conn is not None:
+        try:
+            from common import learn as _learn
+            learn_ctx = _learn.LearnContext(learn_conn)
+        except Exception:
+            learn_ctx = None
 
     items = []
     stats = {"scanned": 0, "skipped": 0, "media": 0, "dup": 0, "blurry": 0,
@@ -357,10 +406,16 @@ def plan_media_files(paths, cfg, *, classifier=None, index=None, library_root=No
             stats["review"] += 1
             continue
 
+        fired_ids = []
         if kind_cn == "视频":
-            cat, cat2, s1, s2, why = _classify_video_frames(classifier, frames, row, eff)
+            cat, cat2, s1, s2, why = _classify_video_frames(
+                classifier, frames, row, eff, learn_ctx=learn_ctx, name=name,
+                fired_out=fired_ids)
         else:
             sc = classifier.scores(frames[0], "照片")
+            # v0.2.2 自学习：打分后给匹配类目加分（decide 本体不动）。
+            sc, _fired = _apply_media_boost(sc, learn_ctx, name)
+            fired_ids = list(_fired or [])
             cat, cat2, s1, s2, why = decide(row, sc, blur, white, colors, ar, "", eff)
         if why == "accepted":
             # decide 接受分支：cat=top1、cat2=top2。
@@ -369,6 +424,8 @@ def plan_media_files(paths, cfg, *, classifier=None, index=None, library_root=No
             # 低置信分支：decide 把 top1 类名放在 cat2 位置（cat='待确认'），
             # top2 类名未返回，evidence 只写 top1。
             evidence = "%s %.2f" % (cat2, s1) if cat2 != "待确认" else ""
+        if fired_ids:
+            evidence += " learn:rule#" + ",".join(map(str, fired_ids))
 
         if why == "accepted":
             rel = target_dir(eff, kind_cn, cat)

@@ -161,3 +161,38 @@ CREATE TABLE IF NOT EXISTS jobs (
     log_path    TEXT,
     summary     TEXT
 );
+
+-- 自学习反馈回路（v0.2.2，见 docs/SELF-LEARNING-DESIGN.md；与 common/learn.py 的
+-- ensure_tables() 建表口径一致，IF NOT EXISTS，可反复执行）。
+CREATE TABLE IF NOT EXISTS decision_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    src_path TEXT NOT NULL, ext TEXT, kind TEXT,
+    predicted_category TEXT, predicted_confidence REAL, predicted_reason TEXT,
+    final_category TEXT, final_dst TEXT,
+    outcome TEXT NOT NULL CHECK (outcome IN ('auto_applied','review_approved','review_rejected','user_corrected','manual_move')),
+    corrected INTEGER NOT NULL DEFAULT 0,
+    rule_ids_applied TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S','now')),
+    processed INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_decision_processed ON decision_log (processed);
+
+CREATE TABLE IF NOT EXISTS learned_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL CHECK (kind IN ('filename_pattern','content_keyword','source_path','format_heuristic','policy','media_filename')),
+    pattern TEXT NOT NULL, target TEXT NOT NULL,
+    confidence REAL NOT NULL DEFAULT 0.55,
+    confirmations INTEGER NOT NULL DEFAULT 0,
+    corrections INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL CHECK (status IN ('active','disabled')) DEFAULT 'active',
+    source TEXT, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S','now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S','now')),
+    UNIQUE (kind, pattern, target)
+);
+CREATE INDEX IF NOT EXISTS idx_learned_status ON learned_rules (status);
+
+CREATE TABLE IF NOT EXISTS learn_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_id INTEGER, event TEXT NOT NULL,
+    detail TEXT, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S','now'))
+);
