@@ -16,6 +16,17 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
+from common.version import read_local_version  # noqa: E402
+
+# 0.2.4：版本号期望一律从项目 VERSION 文件取，升版不再逐行改测试
+# （0.2.3 升版时漏改此处，2 项在升版后才失败）。
+CUR = read_local_version()["version"]
+
+
+def _bump_patch(v):
+    a, b, c = (int(x) for x in v.split(".")[:3])
+    return "%d.%d.%d" % (a, b, c + 1)
+
 PAGES = ["/", "/review", "/jobs", "/browse", "/rules", "/settings"]
 
 # 注意：api.main 不在模块顶层 import——api/deps.py 在 import 时就把
@@ -52,7 +63,7 @@ def test_nav_version_data_source(client):
     c, _, _ = client
     r = c.get("/api/dashboard")
     assert r.status_code == 200, r.text
-    assert r.json().get("version") == "0.2.2"
+    assert r.json().get("version") == CUR
 
 
 def _seed_check(upgrade_dir, current, latest):
@@ -70,11 +81,11 @@ def test_nav_update_hint_when_newer_available(client):
     """有新版本时 /api/upgrade/check 给出 latest + update_available=True
    （前端据此在版本号旁显示“有新版 X”，点进总览页升级）。"""
     c, _, upgrade_dir = client
-    _seed_check(upgrade_dir, "0.2.2", "0.2.3")
+    _seed_check(upgrade_dir, CUR, _bump_patch(CUR))
     r = c.get("/api/upgrade/check")
     assert r.status_code == 200, r.text
     d = r.json()
-    assert d["latest"] == "0.2.3" and d["update_available"] is True
+    assert d["latest"] == _bump_patch(CUR) and d["update_available"] is True
 
 
 def test_nav_update_hint_hidden_when_latest(client):

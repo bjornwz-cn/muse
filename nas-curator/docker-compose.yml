@@ -11,7 +11,7 @@
 #   （ollama-cpu 11434 / ollama-gpu 11500 / ocr-service 8866 均在宿主 docker 网桥上）。
 services:
   curator:
-    image: nas-curator:0.2.3
+    image: nas-curator:0.2.4
     container_name: nas-curator
     restart: unless-stopped
     environment:

@@ -32,6 +32,19 @@ STATIC_DIR = os.path.join(PROJECT_ROOT, "web", "static")
 async def lifespan(app: FastAPI):
     ensure_config()  # 容器首次启动：数据卷缺配置时从镜像自带 config/ 复制默认
     DB.init_db(get_db_path())
+    # 0.2.4：启动时清理僵尸任务——容器/API 重启杀死任务进程后，jobs 表的
+    # running 行不会自己消失，总览会一直显示“进行中”（任务 #81/#82，30 小时
+    # 无进度）。清理失败不影响启动。
+    try:
+        _conn = DB.connect(get_db_path())
+        try:
+            _reaped = DB.reap_stale_running_jobs(_conn)
+        finally:
+            _conn.close()
+        if _reaped:
+            print(f"[startup] 清理僵尸任务 {len(_reaped)} 个：{_reaped}")
+    except Exception as e:  # noqa: BLE001 - 启动清理失败不阻塞服务
+        print(f"[startup] 清理僵尸任务失败（不影响启动）：{e}")
     yield
 
 

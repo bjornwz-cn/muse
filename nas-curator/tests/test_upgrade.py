@@ -23,6 +23,15 @@ from common import upgrade_check as UC  # noqa: E402
 from common.version import (  # noqa: E402
     compare_versions, parse_version, parse_version_payload, read_local_version)
 
+# 0.2.4：版本号期望一律从项目 VERSION 文件取，升版不再逐行改测试
+# （0.2.3 升版时漏改此处，7 项在升版后才失败）。
+CUR = read_local_version()["version"]
+
+
+def _bump_patch(v):
+    a, b, c = (int(x) for x in v.split(".")[:3])
+    return "%d.%d.%d" % (a, b, c + 1)
+
 
 # ---------- 版本比较 ----------
 
@@ -64,7 +73,11 @@ def test_parse_version_payload():
 
 def test_read_local_version():
     v = read_local_version()
-    assert v["version"] == "0.2.2", v  # 与项目 VERSION 文件一致
+    with open(os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "VERSION"), encoding="utf-8") as f:
+        raw = json.load(f)
+    assert v["version"] == raw["version"], v  # 与项目 VERSION 文件一致
     missing = read_local_version("/tmp/definitely-not-there-VERSION")
     assert missing["version"] == "0.0.0-dev"  # 缺失不抛错
     print("read_local_version: PASS (local=%s)" % v["version"])
@@ -169,7 +182,7 @@ def test_upgrade_status_idle(client):
     r = client.get("/api/upgrade/status")
     assert r.status_code == 200, r.text
     d = r.json()
-    assert d["state"] == "idle" and d["current_version"] == "0.2.2"
+    assert d["state"] == "idle" and d["current_version"] == CUR
     print("upgrade status idle: PASS")
 
 
@@ -180,7 +193,7 @@ def test_upgrade_check_uses_cache_no_network(client, tmp_path, monkeypatch):
     os.makedirs(d, exist_ok=True)
     import time
     with open(os.path.join(d, "check.json"), "w", encoding="utf-8") as f:
-        json.dump({"current": "0.2.2", "latest": "0.2.3", "update_available": True,
+        json.dump({"current": CUR, "latest": _bump_patch(CUR), "update_available": True,
                    "date": "2026-11-21", "notes": "新功能",
                    "checked_at": int(time.time()), "cached": False, "error": None}, f)
     calls = []
@@ -188,7 +201,7 @@ def test_upgrade_check_uses_cache_no_network(client, tmp_path, monkeypatch):
                         lambda *a, **k: calls.append(1) or (_ for _ in ()).throw(AssertionError("不应发请求")))
     r = client.get("/api/upgrade/check")
     assert r.status_code == 200, r.text
-    assert r.json()["latest"] == "0.2.3" and r.json()["update_available"] is True
+    assert r.json()["latest"] == _bump_patch(CUR) and r.json()["update_available"] is True
     assert calls == []
     print("upgrade check cached: PASS")
 
@@ -214,38 +227,38 @@ def test_upgrade_request_and_status_flow(client):
         p = os.path.join(d, name)
         if os.path.exists(p):
             os.remove(p)
-    r = client.post("/api/upgrade/request", json={"target_version": "0.2.3"})
+    r = client.post("/api/upgrade/request", json={"target_version": _bump_patch(CUR)})
     assert r.status_code == 202, r.text
-    assert r.json()["target_version"] == "0.2.3"
+    assert r.json()["target_version"] == _bump_patch(CUR)
     # 请求标志文件已落盘
     with open(os.path.join(d, "request.json"), encoding="utf-8") as f:
         req = json.load(f)
-    assert req["target_version"] == "0.2.3" and req["status"] == "requested"
-    # 进行中时再提交 → 409（目标须高于当前版本 0.2.2，否则先报 400）
-    r = client.post("/api/upgrade/request", json={"target_version": "0.2.4"})
+    assert req["target_version"] == _bump_patch(CUR) and req["status"] == "requested"
+    # 进行中时再提交 → 409（目标须高于当前版本，否则先报 400）
+    r = client.post("/api/upgrade/request", json={"target_version": _bump_patch(_bump_patch(CUR))})
     assert r.status_code == 409, r.text
     # 状态接口反映 requested
     r = client.get("/api/upgrade/status")
     assert r.json()["state"] == "requested"
-    assert r.json()["target_version"] == "0.2.3"
+    assert r.json()["target_version"] == _bump_patch(CUR)
     # 模拟 watcher 写的状态（running → done）
     with open(os.path.join(d, "status.json"), "w", encoding="utf-8") as f:
         json.dump({"state": "running", "stage": "build", "message": "构建中",
-                   "target_version": "0.2.3", "current_version": "0.2.2",
+                   "target_version": _bump_patch(CUR), "current_version": CUR,
                    "started_at": "2026-11-20T00:00:00", "finished_at": "",
                    "error": "", "rolled_back": False}, f)
     r = client.get("/api/upgrade/status")
     assert r.json()["state"] == "running" and r.json()["stage"] == "build"
     with open(os.path.join(d, "status.json"), "w", encoding="utf-8") as f:
         json.dump({"state": "done", "stage": "done", "message": "升级完成",
-                   "target_version": "0.2.3", "current_version": "0.2.2",
+                   "target_version": _bump_patch(CUR), "current_version": CUR,
                    "started_at": "2026-11-20T00:00:00",
                    "finished_at": "2026-11-20T00:05:00",
                    "error": "", "rolled_back": False}, f)
     r = client.get("/api/upgrade/status")
     assert r.json()["state"] == "done"
     # 完成后可再次提交新请求
-    r = client.post("/api/upgrade/request", json={"target_version": "0.2.4"})
+    r = client.post("/api/upgrade/request", json={"target_version": _bump_patch(_bump_patch(CUR))})
     assert r.status_code == 202, r.text
     # 清理：恢复 idle
     for name in ("request.json", "status.json"):
@@ -258,7 +271,7 @@ def test_upgrade_request_and_status_flow(client):
 def test_dashboard_includes_version(client):
     r = client.get("/api/dashboard")
     assert r.status_code == 200, r.text
-    assert r.json().get("version") == "0.2.2"
+    assert r.json().get("version") == CUR
     print("dashboard version: PASS")
 
 

@@ -397,6 +397,15 @@ def client(tmp_path_factory):
         (json.dumps({"plan_id": pid4}), jid6))
     conn.commit()
     conn.close()
+    # 0.2.4：API 启动时跑启动清理（见 common.db.reap_stale_running_jobs），
+    # 会把库里已有的 running 行当僵尸清掉——生产里任务是在 API 启动后才创建
+    # 的，夹具也一样：进 TestClient 前把进行中任务的 started_at 改为当前
+    # 时间，表示它们是刚创建的活任务（API 断言不依赖 started_at 的绝对值）。
+    conn = DB.connect(db)
+    conn.execute("UPDATE jobs SET started_at=strftime('%Y-%m-%dT%H:%M:%S', 'now')"
+                 " WHERE status='running'")
+    conn.commit()
+    conn.close()
     from fastapi.testclient import TestClient
     with TestClient(app) as c:
         yield c, db

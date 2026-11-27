@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import sqlite3
@@ -444,3 +445,30 @@ def finish_job(conn, job_id, status, summary=None):
         (status, json.dumps(summary, ensure_ascii=False) if summary is not None else None,
          job_id))
     conn.commit()
+
+
+def reap_stale_running_jobs(conn, before=None):
+    """启动时清理僵尸任务（0.2.4，2026-11-27）。
+
+    容器/API 重启会杀死正在跑的任务进程，但 jobs 表里的 running 行不会自己
+    消失——任务 #81/#82（2026-11-26 01:19/01:28 创建，无关联计划、30 小时
+    无进度）因此一直在总览“进行中”区挂着。API 启动时本容器内不可能还有活
+    着的旧任务进程（网页触发的任务随 API 进程同生同死；watcher 的 CLI 任务
+    只在轮次结束时建行并立即结单），所以把 started_at 早于 before（默认当
+    前 UTC 时间，与 started_at 同格式）的 running 行全部标为 failed，summary
+    注明原因。返回被清理的任务 id 列表。
+    """
+    if before is None:
+        before = datetime.datetime.now(datetime.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S")
+    rows = conn.execute(
+        "SELECT id, started_at FROM jobs "
+        "WHERE status='running' AND started_at < ? ORDER BY id",
+        (before,)).fetchall()
+    reaped = []
+    for row in rows:
+        finish_job(conn, row["id"], "failed", {
+            "error": "启动清理：任务开始于 %s，所属进程已随容器/API 重启消失，"
+                     "无进度，标记失败" % row["started_at"]})
+        reaped.append(row["id"])
+    return reaped
