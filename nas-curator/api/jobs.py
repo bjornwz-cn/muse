@@ -160,8 +160,15 @@ def _run_auto_apply(job_id: int, db_path: str, plan_id: int, threshold: float):
                 # 复核队列里看不到、文件会静默留在原地无人处理。
                 conn.execute("UPDATE plan_items SET status='skipped' WHERE id=?",
                              (it["id"],))
-                # 0.1.9 去重：同一 src 已有复核行（待处理或已裁决）时不再新建
+                # 0.1.9 去重：同一 src 已有复核行（待处理或已裁决）时不再新建；
+                # 2026-11-27 提速改动 2：新建行带 size/mtime 指纹，已有行刷新指纹。
+                try:
+                    _mtime = os.path.getmtime(it.get("src") or "")
+                except OSError:
+                    _mtime = None
                 if DB.has_review_for_src(conn, it.get("src")):
+                    DB.refresh_review_fingerprint(conn, it.get("src"),
+                                                  it.get("size"), _mtime)
                     skipped += 1
                     continue
                 DB.add_review(conn, file_id=it.get("file_id"), plan_id=plan_id,
@@ -172,6 +179,7 @@ def _run_auto_apply(job_id: int, db_path: str, plan_id: int, threshold: float):
                                        "reason": it.get("reason"),
                                        "evidence": it.get("evidence"),
                                        "suggested_dst": it.get("dst"),
+                                       "size": it.get("size"), "mtime": _mtime,
                                        "tags": it.get("tags") or []})
                 skipped += 1
         conn.commit()

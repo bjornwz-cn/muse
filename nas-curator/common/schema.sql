@@ -134,6 +134,7 @@ CREATE TABLE IF NOT EXISTS operations (
     src_path      TEXT NOT NULL,
     dst_path      TEXT NOT NULL,
     sha256        TEXT,
+    decided_by    TEXT,
     executed_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
     rolled_back_at TEXT
 );

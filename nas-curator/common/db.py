@@ -31,6 +31,10 @@ def init_db(path: str | None = None) -> str:
         if "auto_exempt" not in cols:
             conn.execute("ALTER TABLE plan_items "
                          "ADD COLUMN auto_exempt INTEGER NOT NULL DEFAULT 0")
+        # 2026-11-27 提速改动 1：operations 表补 decided_by 列（自动删除审计用）。
+        cols_op = [r[1] for r in conn.execute("PRAGMA table_info(operations)")]
+        if "decided_by" not in cols_op:
+            conn.execute("ALTER TABLE operations ADD COLUMN decided_by TEXT")
         conn.commit()
     finally:
         conn.close()
@@ -270,12 +274,31 @@ def get_plan(conn, plan_id):
 
 # ---------------------------------------------------------------- operations
 
-def add_operation(conn, plan_id, src_path, dst_path, sha256=None):
+def add_operation(conn, plan_id, src_path, dst_path, sha256=None, decided_by=None):
+    """记一条执行记录；decided_by 记录是谁定的（如自动删除 auto:dup-sha256）。
+
+    2026-11-27 提速改动 1：operations 表新增 decided_by 列（旧库由 init_db
+    迁移补列）；删除行用 dst_path="<deleted>" 哨兵（见 common.dup_delete），
+    回滚时跳过删除行。
+    """
     cur = conn.execute(
-        "INSERT INTO operations (plan_id, src_path, dst_path, sha256) VALUES (?, ?, ?, ?)",
-        (plan_id, src_path, dst_path, sha256))
+        "INSERT INTO operations (plan_id, src_path, dst_path, sha256, decided_by)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (plan_id, src_path, dst_path, sha256, decided_by))
     conn.commit()
     return cur.lastrowid
+
+
+def get_operation_for_src(conn, src):
+    """同一 src 最近一次未回滚的移动记录；没有返回 None。
+
+    2026-11-27 提速改动 1：dup:sha256 的 evidence 旧址已空时，用它找保留份
+    被移走的目的地（见 common.dup_delete.resolve_kept_path）。
+    """
+    row = conn.execute(
+        "SELECT * FROM operations WHERE src_path=? AND rolled_back_at IS NULL"
+        " ORDER BY id DESC LIMIT 1", (src,)).fetchone()
+    return _d(row)
 
 
 def list_operations(conn, plan_id):
@@ -290,6 +313,72 @@ def mark_rolled_back(conn, op_id):
 
 
 # ---------------------------------------------------------------- review_queue
+
+def get_review_for_src(conn, src):
+    """返回同一 src 的复核行（pending 或已裁决），payload 已解析；没有返回 None。
+
+    2026-11-27 提速改动 2：watcher 跳过已复核文件与 dup 自动删除共用本函数。
+    """
+    row = conn.execute(
+        "SELECT * FROM review_queue WHERE "
+        "json_extract(payload, '$.src')=? AND status IN ('pending','approved','rejected')"
+        " ORDER BY id LIMIT 1",
+        (src,)).fetchone()
+    if row is None:
+        return None
+    d = _d(row)
+    if d.get("payload"):
+        try:
+            d["payload"] = json.loads(d["payload"])
+        except ValueError:
+            d["payload"] = {}
+    return d
+
+
+def list_reviewed_fingerprints(conn):
+    """全部复核行（pending/已裁决）的 {src: {"size", "mtime", "row_id"}}。
+
+    2026-11-27 提速改动 2：watcher 每轮一次查全表、内存里比对，避免每文件
+    一次 json_extract 全表扫描。payload 里无 size/mtime 的是改动 2 之前的旧行。
+    """
+    out = {}
+    for r in conn.execute(
+            "SELECT id, payload FROM review_queue "
+            "WHERE status IN ('pending','approved','rejected')"):
+        try:
+            p = json.loads(r["payload"]) if r["payload"] else {}
+        except ValueError:
+            p = {}
+        src = p.get("src")
+        if not src:
+            continue
+        out[src] = {"size": p.get("size"), "mtime": p.get("mtime"),
+                    "row_id": r["id"]}
+    return out
+
+
+def refresh_review_fingerprint(conn, src, size=None, mtime=None):
+    """已有复核行的指纹（size/mtime）刷成当前值；无行或指纹已一致时不写。
+
+    2026-11-27 提速改动 2：文件改动后重新分类、结论不变时，复核行仍只有
+    一条，但指纹要跟上最新文件状态，否则下轮还会被重复分类。
+    返回 True=写了，False=无行/无需写。
+    """
+    row = get_review_for_src(conn, src)
+    if row is None:
+        return False
+    p = row.get("payload") or {}
+    if p.get("size") == size and p.get("mtime") == mtime:
+        return False
+    if size is not None:
+        p["size"] = size
+    if mtime is not None:
+        p["mtime"] = mtime
+    conn.execute("UPDATE review_queue SET payload=? WHERE id=?",
+                 (json.dumps(p, ensure_ascii=False), row["id"]))
+    conn.commit()
+    return True
+
 
 def has_review_for_src(conn, src):
     """0.1.9 去重：同一 src 是否已有复核行（pending，或已裁决 approved/rejected）。

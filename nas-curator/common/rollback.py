@@ -96,9 +96,15 @@ def rollback_from_map(map_path, dry_run=False):
 
 
 def rollback_from_operations(conn, plan_id, dry_run=False, mark=True):
-    """从 DB 的 operations 表回滚某次 plan；成功移回的逐条写 rolled_back_at。"""
+    """从 DB 的 operations 表回滚某次 plan；成功移回的逐条写 rolled_back_at。
+
+    删除行（dst_path == "<deleted>"，见 common.dup_delete）不可回滚——删前有
+    逐名清单 + DB 备份，恢复走清单/快照，不走本函数；此处直接跳过。
+    """
     from . import db as _db
-    ops = _db.list_operations(conn, plan_id)
+    from .dup_delete import DELETED_DST
+    ops = [o for o in _db.list_operations(conn, plan_id)
+           if o["dst_path"] != DELETED_DST]
     pairs = [(o["src_path"], o["dst_path"]) for o in ops]
     moved, missing, failed = rollback_pairs(pairs, dry_run=dry_run)
     if mark and not dry_run:

@@ -657,7 +657,8 @@ def plan_files(root, rules, *, llm=None, sem=None, prescreener=None, rename=Fals
                no_ocr=False, max_chars=2000, ocr_timeout=90, llm_min_conf=0.55,
                llm_max=2000, llm_all=False, llm_chunk=8, llm_timeout=240,
                strong=12, name_template="{date}_{title}", deep=False,
-               digest=None, db_conn=None, dst_root=None, learn_conn=None):
+               digest=None, db_conn=None, dst_root=None, learn_conn=None,
+               skip_reviewed=None):
     """生成统一 plan-item 列表。返回 (items, stats)。
 
     rules 接受 dict 或 JSON 文件路径；llm/sem/prescreener 接受已建好的
@@ -666,6 +667,8 @@ def plan_files(root, rules, *, llm=None, sem=None, prescreener=None, rename=Fals
     db_conn 传入 common.db 的连接时做跨轮 SHA256 去重；不传只做本轮内去重。
     dst_root 传入目标库根目录时，move/rename 项的 dst 落到该库（输入源归位用）；
     不传则 dst 落在扫描根目录内（库内整理）。
+    skip_reviewed 传入 path->bool 时，返回 True 的散文件在正文抽取前剔除
+    （2026-11-27 提速改动 2：watcher 跳过已有复核行且未改动的文件）。
     """
     root = os.path.abspath(root)
     rules = _load_rules(rules)
@@ -742,6 +745,17 @@ def plan_files(root, rules, *, llm=None, sem=None, prescreener=None, rename=Fals
         if "/" in rel and rel.split("/")[0] in cat_tops:
             continue
         items.append((p, st, rel, None))
+    # 2026-11-27 提速改动 2：已有复核行且未改动的文件在正文抽取前剔除
+    # （只滤散文件；整目录 unit 的文本抽样量有上限，不滤）。
+    n_review_skipped = 0
+    if skip_reviewed is not None:
+        kept_items = []
+        for it in items:
+            if skip_reviewed(it[0]):
+                n_review_skipped += 1
+            else:
+                kept_items.append(it)
+        items = kept_items
     for u in units:
         picks = []
         for dp, dns, fns in os.walk(u["path"]):
@@ -1149,6 +1163,7 @@ def plan_files(root, rules, *, llm=None, sem=None, prescreener=None, rename=Fals
         "sem_hits": sem_hits,
         "units": len(units),
         "loose": len(items),
+        "review_skipped": n_review_skipped,
         "with_text": sum(1 for r in rows if r["text_len"] >= 20),
         "sources": dict(Counter(srcs.values())),
         "corrections": {"family": fanout, "dir_vote": votes, "near_dup": near},

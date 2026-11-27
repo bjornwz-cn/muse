@@ -188,14 +188,25 @@ def _dispatch_plan(root, kind, rules, llm, sem, prescreener, args, cfg,
     照片视频走媒体引擎，dst=媒体库；文档引擎产出的 kind=media 项丢弃（媒体引擎覆盖）。
     已知局限（P1）：文档默认归工作库；家庭 vs 工作的分流需家庭规则，P2 再做。
     learn_conn：v0.2.2 自学习——传入 DB 连接时启用学到的规则提分；不传则关闭。
+    2026-11-27 提速改动 2：learn_conn 同时是 DB 连接时建 _ReviewSkipper，
+    分类前过滤已有复核行且未改动的文件（文档在 plan_files 内、媒体在
+    _collect_media_paths 之后）。
     """
+    # 2026-11-27 提速改动 2：learn_conn 即 DB 连接时建跳过器；None 时不跳过。
+    skipper = _ReviewSkipper(learn_conn) if learn_conn is not None else None
     if kind == "media":
         from media_core import engine as ME
         classifier, mcfg = _build_media_classifier(args)
         mcfg.setdefault("library_root", root)
         paths = _collect_media_paths(root)
+        if skipper is not None:
+            paths = [p for p in paths if not skipper.should_skip(p)]
         items, stats = ME.plan_media_files(paths, mcfg, classifier=classifier,
                                            library_root=root, learn_conn=learn_conn)
+        stats = dict(stats)
+        stats["review_skipped"] = skipper.skipped if skipper is not None else 0
+        if skipper is not None and skipper.skipped:
+            print(f"  复核跳过：{skipper.skipped} 项已有复核行且未改动，本轮不再分类")
         return _apply_path_guard(items, cfg), stats
     from curator_core import engine as CE
     if rules is None:
@@ -212,7 +223,8 @@ def _dispatch_plan(root, kind, rules, llm, sem, prescreener, args, cfg,
         no_ocr=args.no_ocr, max_chars=args.max_chars,
         ocr_timeout=args.ocr_timeout, llm_min_conf=args.llm_min_conf,
         llm_max=args.llm_max, dst_root=dst_root or None,
-        deep=getattr(args, "deep", False), learn_conn=learn_conn)
+        deep=getattr(args, "deep", False), learn_conn=learn_conn,
+        skip_reviewed=skipper.should_skip if skipper is not None else None)
     if kind == "mixed":
         from media_core import engine as ME
         # P2(P1.1)：家庭 vs 工作分流（文档项按启发式改写 dst 到家庭库/人名）。
@@ -222,14 +234,23 @@ def _dispatch_plan(root, kind, rules, llm, sem, prescreener, args, cfg,
         dropped = len(items) - len(kept)
         classifier, mcfg = _build_media_classifier(args)
         mpaths = _collect_media_paths(root)
+        if skipper is not None:
+            mpaths = [p for p in mpaths if not skipper.should_skip(p)]
         mitems, mstats = ME.plan_media_files(mpaths, mcfg, classifier=classifier,
                                              library_root=media_root,
                                              learn_conn=learn_conn)
         stats = dict(stats)
         stats["media"] = mstats
+        stats["review_skipped"] = skipper.skipped if skipper is not None else 0
         if dropped:
             stats["media_doc_dropped"] = dropped
+        if skipper is not None and skipper.skipped:
+            print(f"  复核跳过：{skipper.skipped} 项已有复核行且未改动，本轮不再分类")
         return _apply_path_guard(kept + mitems, cfg), stats
+    stats = dict(stats)
+    stats["review_skipped"] = skipper.skipped if skipper is not None else 0
+    if skipper is not None and skipper.skipped:
+        print(f"  复核跳过：{skipper.skipped} 项已有复核行且未改动，本轮不再分类")
     return _apply_path_guard(items, cfg), stats
 
 
@@ -462,8 +483,13 @@ def _store_plan(conn, library_id, rules_version, items):
     for it in items:
         DB.add_plan_item(conn, plan_id, it)
         if it.get("action") == "review":
+            # 2026-11-27 提速改动 2：复核行 payload 带 size/mtime 指纹，供下轮
+            # watcher 跳过未改动文件用；行已存在时刷新指纹（文件改动后重分类，
+            # 行不增、指纹跟上）。
+            size, mtime = _review_fingerprint(it)
             if DB.has_review_for_src(conn, it.get("src")):
                 n_dup_skipped += 1
+                DB.refresh_review_fingerprint(conn, it.get("src"), size, mtime)
                 continue
             DB.add_review(conn, file_id=it.get("file_id"), plan_id=plan_id,
                           kind=it.get("review_kind") or "low_conf",
@@ -472,6 +498,7 @@ def _store_plan(conn, library_id, rules_version, items):
                                    "reason": it.get("reason"),
                                    "evidence": it.get("evidence"),
                                    "suggested_dst": it.get("dst"),
+                                   "size": size, "mtime": mtime,
                                    "tags": it.get("tags") or []})
     if n_dup_skipped:
         print(f"  复核去重：{n_dup_skipped} 项已有复核行（待处理或已裁决），不再新建复核行")
@@ -799,6 +826,46 @@ def cmd_explain(args):
 
 # ---------------------------------------------------------------- inbox / process
 
+def _review_fingerprint(item):
+    """复核行指纹 (size, mtime)：size 取 plan-item，mtime 现场 stat；
+    文件已消失时 mtime 为 None。"""
+    try:
+        mtime = os.path.getmtime(item.get("src") or "")
+    except OSError:
+        mtime = None
+    return item.get("size"), mtime
+
+
+class _ReviewSkipper:
+    """watcher 跳过已复核文件（2026-11-27 提速改动 2）。
+
+    每轮分类前用 DB 里全部复核行（pending 或已裁决）的指纹过滤待分类路径：
+    有复核行且 size/mtime 与现状一致 → 本轮不再分类（省掉正文抽取/VLM/
+    SHA256 全读）；无行、指纹缺失（改动 2 之前的旧行）、或文件改动过 →
+    正常纳入。指纹缺失的旧行本轮不跳过，_store_plan 会在建行去重时把指纹
+    补上，下一轮起生效。
+    """
+    def __init__(self, conn):
+        self._fp = DB.list_reviewed_fingerprints(conn) if conn is not None else {}
+        self.skipped = 0
+
+    def should_skip(self, path):
+        ent = self._fp.get(path)
+        if not ent:
+            return False
+        size, mtime = ent.get("size"), ent.get("mtime")
+        if size is None or mtime is None:
+            return False
+        try:
+            st = os.stat(path)
+        except OSError:
+            return False
+        if st.st_size == size and st.st_mtime == mtime:
+            self.skipped += 1
+            return True
+        return False
+
+
 def _settle_filter(items, settle_minutes):
     """只留「稳定」文件：mtime 早于 now - settle 分钟；其余计入 skipped。"""
     if not settle_minutes:
@@ -945,8 +1012,11 @@ def _apply_items(items, root, args, conn, plan_id):
     if held:
         print(f"  自动执行门控：{len(held)} 项置信度 < {threshold}，不自动移动，进复核队列")
         for i in held:
-            # 0.1.9 去重：同一 src 已有复核行（待处理或已裁决）时不再新建
+            # 0.1.9 去重：同一 src 已有复核行（待处理或已裁决）时不再新建；
+            # 2026-11-27 提速改动 2：新建行带 size/mtime 指纹，已有行刷新指纹。
+            size, mtime = _review_fingerprint(i)
             if DB.has_review_for_src(conn, i.get("src")):
+                DB.refresh_review_fingerprint(conn, i.get("src"), size, mtime)
                 continue
             DB.add_review(conn, file_id=i.get("file_id"), plan_id=plan_id,
                           kind="low_conf",
@@ -955,6 +1025,7 @@ def _apply_items(items, root, args, conn, plan_id):
                                    "reason": i.get("reason"),
                                    "evidence": i.get("evidence"),
                                    "suggested_dst": i.get("dst"),
+                                   "size": size, "mtime": mtime,
                                    "tags": i.get("tags") or []})
     todo = gated
     from curator_core import engine as CE
@@ -979,6 +1050,29 @@ def _apply_items(items, root, args, conn, plan_id):
         DB.set_plan_status(conn, plan_id, "done", report)
         if args.report:
             _write_apply_report(args.report, root, report, args.map)
+    # 精确重复自动删除（2026-11-27 提速改动 1）：只删收件箱里、保留份已通过
+    # 三重验证的 dup:sha256 副本；验证细节与删除纪律见 common.dup_delete。
+    # 本阶段跑在 move/rename 之后——同批先出现的副本先归位，其 operations
+    # 行可作 evidence 解析依据（见 resolve_kept_path）。预演只报数不删。
+    dup_stats = {"candidates": 0, "deleted": 0, "would_delete": 0}
+    try:
+        from common import dup_delete as _DD
+        # 清单与 DB 备份必须落持久卷：放 DB 同目录（生产上是 /data），不能放
+        # _HERE/data（容器内 /app/data，非挂载卷，重建即丢，删除审计就没了）。
+        _db_dir = os.path.dirname(os.path.abspath(args.db)) \
+            if getattr(args, "db", None) else os.path.join(_HERE, "data")
+        dup_stats = _DD.delete_exact_dup_copies(
+            items, conn, plan_id, RT.roots_from_config(_load_libraries()),
+            manifest_dir=os.path.join(_db_dir, "dup_deletions"),
+            backup_dir=os.path.join(_db_dir, "backups"),
+            dry_run=bool(args.dry_run))
+    except Exception as e:  # noqa: BLE001 - 删除失败不影响已执行的移动
+        print(f"  ! 精确重复自动删除失败：{e}（已移动项不受影响）")
+    n_dup = dup_stats.get("deleted", 0) or dup_stats.get("would_delete", 0)
+    if dup_stats.get("candidates"):
+        print(f"  精确重复：候选 {dup_stats['candidates']} 项，"
+              f"{'预演可删' if args.dry_run else '已删'} {n_dup} 项"
+              + (f"，清单 {dup_stats.get('manifest')}" if dup_stats.get("manifest") else ""))
     print(f"{'[预演] ' if args.dry_run else ''}移动 {report.get('moved', 0)} 项，"
           f"跳过/失败 {len(report.get('failed', []))} 项")
     return report

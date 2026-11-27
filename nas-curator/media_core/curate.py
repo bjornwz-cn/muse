@@ -67,6 +67,14 @@ except Exception:
 IMG_EXT = DEFAULT_IMAGE_EXTS
 VID_EXT = {'.mp4', '.mov', '.m4v', '.avi', '.mkv', '.wmv', '.flv', '.3gp', '.mpg',
            '.mpeg', '.mts', '.m2ts', '.webm', '.insv', '.vob', '.rmvb'}
+
+# 解不开的视频黑名单（2026-11-27 提速改动 3）：RealVideo 容器 .rm/.rmvb/.ram。
+# 容器内 ffmpeg 的 rv40 解码器会在 "B-frame without reference data" 上报错
+# 刷屏、cv2 抽帧空转烧 CPU，且本项目无 RealVideo 解码需求——一律不尝试
+# 解码，直接记无法验证、留复核。注意：VID_EXT 里目前只有 .rmvb 是媒体
+# 扩展名（.rm/.ram 不进媒体收集，见 is_media）；这里三者都列是防御性的，
+# 万一扩展名集合日后扩进来，解码路径仍直接跳过。
+UNDECODABLE_VIDEO_EXTS = frozenset({".rm", ".rmvb", ".ram"})
 # 照片 + 视频扩展名全集：与 is_media() 的判定完全一致；统一 CLI 用它收集媒体路径。
 MEDIA_EXTS = frozenset(IMG_EXT | VID_EXT)
 
@@ -553,7 +561,11 @@ def video_frames(path, max_frames=6, step=10):
     decode_failed 处理）。每帧走同一套图片分类，众数投票在 engine 层做。
     0.1.8 改动：同一 VideoCapture 只开一次、逐点 seek（不再每点拉起一次
     ffmpeg 子进程）；cv2 缺失或打不开文件时返回 []。
+    2026-11-27 提速改动 3：RealVideo 黑名单扩展名直接返回 []，不拉起
+    VideoCapture（rv40 解码报错刷屏、抽帧空转烧 CPU）。
     """
+    if os.path.splitext(path)[1].lower() in UNDECODABLE_VIDEO_EXTS:
+        return []
     cv2 = _load_cv2()
     if cv2 is None:
         return []
@@ -661,6 +673,11 @@ def decode_item_frames(row):
     from PIL import Image
     frames, note, blur, white, colors, ar = [], '', 0.0, 0.0, 999, 1.0
     tmpc = None
+    # 2026-11-27 提速改动 3：RealVideo 黑名单扩展名不尝试解码，直接记无法
+    # 验证（note 带扩展名，调用方按 decode_failed 进复核）；后续轮次靠
+    # 复核行去重（改动 2）不再重试，不在此处缓存。
+    if (row.get('ext') or '').lower() in UNDECODABLE_VIDEO_EXTS:
+        return [], 0.0, 0.0, 999, 1.0, "unsupported_codec:%s" % row.get('ext')
     try:
         src, tmpc = ensure_readable(row['path'])
         if not src:
