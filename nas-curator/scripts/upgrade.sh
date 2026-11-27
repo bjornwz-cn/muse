@@ -219,7 +219,7 @@ main() {
 
   # ---- 3. 备份数据库（容器内 VACUUM INTO，见 0.1.2/0.1.3 部署口径）----
   status_write "running" "backup" "备份数据库" "" "false"
-  local bak="nas-curator.db.bak-$(date '+%Y%m%d')-pre${TARGET}"
+  local bak="nas-curator.db.bak-$(date '+%Y%m%d-%H%M%S')-pre${TARGET}"
   if ! $DOCKER exec nas-curator python3 -c \
       "import sqlite3; c=sqlite3.connect('/data/nas-curator.db'); c.execute(\"VACUUM INTO '/data/$bak'\"); c.close()" \
       >> "$logfile" 2>&1; then
