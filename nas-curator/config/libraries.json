@@ -76,6 +76,9 @@
   ],
   "thresholds": {
     "auto": 0.85,
+    "auto_doc_llm": 0.75,
+    "auto_media": 0.65,
+    "auto_media_margin": 0.15,
     "prescreen_margin": 0.1,
     "prescreen_sim": 0.75,
     "review_suggest": 0.6

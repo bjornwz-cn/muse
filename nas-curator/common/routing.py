@@ -235,18 +235,133 @@ def _conf_of(item):
         return 0.0
 
 
-def is_auto_apply_eligible(item, threshold=0.85):
-    """自动执行资格（2026-11-24 计划 #160 修复后口径，唯一判定入口）。
+# 0.2.5：分模态自动执行阈值（2026-11-28 母本提案 §3.1，王震批准全做）。
+# 0.85 是为文档规则分设计的（12 分→0.9、8 分→0.85），但 LLM 文档最高分
+# 只有 0.80、媒体 12 类 softmax 中位 0.58——两种分类器的高质量结论都
+# 够不到 0.85。改为按项取阈值：LLM 文档 0.75、媒体 0.65（另加 margin
+# 约束）、规则分文档仍用 0.85 兜底；EXIF 定位置放是确定性结论，恒可自动。
+MEDIA_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp",
+                    ".gif", ".bmp", ".tif", ".tiff"}
+MEDIA_VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".mpg", ".mpeg",
+                    ".m4v", ".webm", ".wmv", ".flv", ".3gp"}
+MEDIA_EXTS = MEDIA_IMAGE_EXTS | MEDIA_VIDEO_EXTS
+
+# 复核 kind 细分（0.2.5 §3.4）：不可读/无正文/不支持格式不再混进 low_conf。
+MISC_REVIEW_KINDS = ("unreadable", "unsupported", "no_text")
+
+
+def _is_media_ext(ext):
+    return (ext or "").lower() in MEDIA_EXTS
+
+
+def _is_exif_placed(item):
+    """EXIF 年/月定位置放（0.2.5 §3.7）：归位目标由拍摄日期决定，是确定性
+    结论而非模型猜测；内容分类只写标签，不影响归位。"""
+    it = item or {}
+    if it.get("exif_placed"):
+        return True
+    return (it.get("reason") or "").startswith("exif:")
+
+
+def _threshold_float(thresholds, key, default):
+    try:
+        return float((thresholds or {}).get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def auto_threshold_for(item, thresholds=None):
+    """按项取自动执行门槛（0.2.5 §3.1；守卫与自动执行门控共用）。
+    EXIF 定位置放 -> 0.0（确定性归位，恒可自动）；LLM 文档 -> auto_doc_llm
+    （默认 0.75）；媒体 -> auto_media（默认 0.65）；其余（规则分文档）->
+    auto（默认 0.85，保持兜底不变）。"""
+    it = item or {}
+    if _is_exif_placed(it):
+        return 0.0
+    reason = it.get("reason") or ""
+    if reason.startswith("llm:"):
+        return _threshold_float(thresholds, "auto_doc_llm", 0.75)
+    if it.get("kind") == "media" or _is_media_ext(it.get("ext")):
+        return _threshold_float(thresholds, "auto_media", 0.65)
+    return _threshold_float(thresholds, "auto", 0.85)
+
+
+def _media_margin(item):
+    """媒体 evidence 里 top1-top2 的差（'A 0.72 / B 0.10'）；无 top2 时 None。"""
+    ev = (item or {}).get("evidence") or ""
+    nums = _re.findall(r"\d+\.\d+", ev)
+    if len(nums) >= 2:
+        try:
+            return float(nums[0]) - float(nums[1])
+        except ValueError:
+            return None
+    return None
+
+
+def recover_confidence_original(item):
+    """从 plan-item/review payload 里恢复压之前的原始置信度：
+    1) confidence_original 字段（0.2.5 新行自带）；
+    2) reason 里的分类器分数（llm:0.70 / siglip:0.80 / rule+sem:0.85 /
+       prescreen: / sem:；exif:…;siglip:0.80 也取 siglip 部分）；
+    3) evidence 首个分数（媒体 'A 0.72 / B 0.10' 取 top1）；
+    4) 兜底用 confidence 本身。"""
+    it = item or {}
+    v = it.get("confidence_original")
+    try:
+        if v not in ("", None):
+            return float(v)
+    except (TypeError, ValueError):
+        pass
+    reason = it.get("reason") or ""
+    m = _re.search(r"(?:llm|siglip|rule\+sem|prescreen|sem):(\d+\.\d+)", reason)
+    if m:
+        try:
+            return float(m.group(1))
+        except ValueError:
+            pass
+    ev = it.get("evidence") or ""
+    nums = _re.findall(r"\d+\.\d+", ev)
+    if nums:
+        try:
+            return float(nums[0])
+        except ValueError:
+            pass
+    return _conf_of(it)
+
+
+def review_kind_for_reason(reason, default="low_conf"):
+    """reason 前缀 -> 复核 kind 细分（0.2.5 §3.4）。不可读/无正文/不支持
+    格式不再混进 low_conf，Web 默认过滤，不占人工队列。"""
+    r = (reason or "")
+    if r.startswith("unreadable:"):
+        return "unreadable"
+    if r.startswith("no-text:") or r == "scanned-no-text":
+        return "no_text"
+    if r.startswith("unsupported"):
+        return "unsupported"
+    if r.startswith("blurry:"):
+        return "blur"
+    return default
+
+
+def is_auto_apply_eligible(item, threshold=None, thresholds=None):
+    """自动执行资格（2026-11-24 计划 #160 修复后口径，唯一判定入口；
+    0.2.5 改为按项取分模态阈值）。
 
     只有同时满足三条的项才能自动执行：
       1. action 为 move/rename；
-      2. confidence >= threshold（默认 0.85）；
+      2. confidence >= 按项取的阈值（LLM 文档 0.75、媒体 0.65、规则分
+         文档 0.85 兜底；EXIF 定位置放恒可自动）；
       3. kind 不是 "unit"（整目录），ext 不是 "(目录)"。
     整目录 unit 项永不自动执行（不论置信度），一律进复核；
     低于阈值的项永不自动执行，对所有 kind 一视同仁。
+    媒体另加 margin 约束：evidence 里 top1-top2 < auto_media_margin
+    （默认 0.15）时不自动（EXIF 定位置放除外：归位不依赖内容判断）。
     auto_exempt 例外已废除：该字段不再赋予任何自动执行资格，任何分支
     不得再以它绕过阈值（计划 #160：0.4 置信度的 unit 项凭 auto_exempt
     绕过阈值与路径先验，整树搬走 21,933 个文件）。
+    threshold 显式传入时仍优先（向后兼容：老调用方传 0.85 浮点数）；
+    否则按 auto_threshold_for(item, thresholds) 取分模态阈值。
     CLI（curator._apply_items）与 Web API（api.jobs._run_auto_apply）
     两处门控都必须调本函数，不得各自另写条件。
     """
@@ -255,21 +370,41 @@ def is_auto_apply_eligible(item, threshold=0.85):
         return False
     if it.get("kind") == "unit" or it.get("ext") == "(目录)":
         return False
-    return _conf_of(it) >= threshold
+    thr = threshold if threshold is not None else auto_threshold_for(it, thresholds)
+    try:
+        thr = float(thr)
+    except (TypeError, ValueError):
+        thr = 0.85
+    if not _conf_of(it) >= thr:
+        return False
+    if it.get("kind") == "media" and not _is_exif_placed(it):
+        m = _media_margin(it)
+        if m is not None and m < _threshold_float(thresholds, "auto_media_margin", 0.15):
+            return False
+    return True
 
 
-def apply_path_prior_guard(items, roots, auto_threshold=0.85):
+def apply_path_prior_guard(items, roots, auto_threshold=0.85, thresholds=None):
     """路径强信号后处理（0.1.2）：低置信建议不得跨顶层移动；只有高置信
     才能建议跨顶层。只改 items 里的建议（action/dst/category/reason），
     不动任何文件。2026-11-24 计划 #160 修复：本守卫对所有项一视同仁，
     整目录 unit 项不再豁免（原 auto_exempt 跳过已删除）。
 
-    规则：move/rename 项，conf < auto_threshold，且 dst 顶层 != src 顶层
-    （src/dst 顶层都能认出时）-> 转 review（dst 清空，review_kind=low_conf，
-    置信度压到 0.45，reason 追加 path-prior 标注）。
-    返回 (items, {"guarded": n})。
+    0.2.5（母本提案 §3.1/§3.2）：
+    - 按项取阈值：thresholds 传入时调 auto_threshold_for（LLM 文档 0.75、
+      媒体 0.65、规则分文档 0.85）；未传时沿用 auto_threshold 浮点数
+      （向后兼容）。
+    - 收件箱/输入源 -> 三库属于正常归位，不是“危险跨库”：低于门槛只转
+      review，保留 dst 作建议、不压置信度。
+    - 库 -> 库的跨顶层：低于门槛仍转 review，但 0.2.5 起也不再清空 dst
+      （批量批准要靠 suggested_dst 搬文件），置信度仍压到 0.45 作
+      “系统没把握”的信号（前端显示 confidence_original，不受影响）。
+    规则：move/rename 项，conf < 按项取的阈值，且 dst 顶层 != src 顶层
+    （src/dst 顶层都能认出时）-> 转 review（review_kind=low_conf）。
+    返回 (items, {"guarded": n, "kept_dst": m})。
     """
     guarded = 0
+    kept_dst = 0
     for it in items or []:
         if it.get("action") not in ("move", "rename"):
             continue
@@ -281,17 +416,25 @@ def apply_path_prior_guard(items, roots, auto_threshold=0.85):
         if src_top is None or dst_top is None or src_top == dst_top:
             continue
         conf = _conf_of(it)
-        if conf >= auto_threshold:
+        thr = (auto_threshold_for(it, thresholds) if thresholds is not None
+               else auto_threshold)
+        if conf >= thr:
             continue
         it["action"] = "review"
-        it["dst"] = ""
-        it["review_kind"] = "low_conf"
-        it["confidence"] = min(conf, 0.45)
+        it["review_kind"] = it.get("review_kind") or "low_conf"
         reason = it.get("reason") or ""
-        it["reason"] = (reason + f";path-prior:低置信{conf:.2f}不跨顶层"
-                        f"（{top_label(src_top)}→{top_label(dst_top)}）")
+        if src_top in ("inbox", "mac-backup") and dst_top in ("work", "family", "media"):
+            # 正常归位：保留建议目标与原始置信度，只转复核。
+            it["reason"] = (reason + f";path-prior:低置信{conf:.2f}未达{thr:.2f}进复核"
+                            f"（{top_label(src_top)}→{top_label(dst_top)}，已保留建议目标）")
+            kept_dst += 1
+        else:
+            # 库间跨顶层：保留 dst 作建议（0.2.5 §3.2），置信度仍压到 0.45。
+            it["confidence"] = min(conf, 0.45)
+            it["reason"] = (reason + f";path-prior:低置信{conf:.2f}不跨顶层"
+                            f"（{top_label(src_top)}→{top_label(dst_top)}）")
         guarded += 1
-    return items, {"guarded": guarded}
+    return items, {"guarded": guarded, "kept_dst": kept_dst}
 
 
 def route_document(name="", text="", tags=()):

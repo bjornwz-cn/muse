@@ -120,7 +120,8 @@
   function kindTag(kind) {
     var labels = {
       low_conf: '低置信', dup: '重复', blur: '模糊',
-      ambiguous: '待确认', sensitive: '敏感', shell: '空壳'
+      ambiguous: '待确认', sensitive: '敏感', shell: '空壳',
+      unreadable: '不可读', unsupported: '不支持', no_text: '无正文'
     };
     return '<span class="tag kind-' + esc(kind || '') + '">' + esc(labels[kind] || kind || '—') + '</span>';
   }

@@ -144,7 +144,7 @@ CREATE TABLE IF NOT EXISTS review_queue (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     file_id    INTEGER REFERENCES files (id),
     plan_id    INTEGER REFERENCES plans (id),
-    kind       TEXT NOT NULL CHECK (kind IN ('low_conf', 'dup', 'blur', 'ambiguous', 'shell', 'sensitive')),
+    kind       TEXT NOT NULL CHECK (kind IN ('low_conf', 'dup', 'blur', 'ambiguous', 'shell', 'sensitive', 'unreadable', 'unsupported', 'no_text')),
     payload    TEXT,
     status     TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected')) DEFAULT 'pending',
     decided_by TEXT,

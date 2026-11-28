@@ -605,11 +605,12 @@ def _to_plan_item(row, root, min_score, rename, texts, mtimes, dst_root=None):
     action, review_kind = _decide_action(row, rename)
     is_review = action == "review"
     conf = _map_confidence(row, min_score, is_review)
+    # 0.2.5 §3.2：保留压之前的原始置信度，供前端显示与重分类按新阈值重评。
+    conf_orig = _map_confidence(row, min_score, False)
     target_name = row.get("target_name") or os.path.basename(src)
     dst_base = dst_root or root
-    if is_review:
-        dst = ""
-    elif is_unit:
+    # 0.2.5 §3.2：review 项不再清空 dst，保留作建议目标（批量批准靠它搬文件）。
+    if is_unit:
         dst = os.path.join(dst_base, cat)
     else:
         dst = os.path.join(dst_base, cat, target_name)
@@ -633,7 +634,8 @@ def _to_plan_item(row, root, min_score, rename, texts, mtimes, dst_root=None):
         kind = "document"
     return {
         "src": src, "dst": dst, "new_name": target_name, "category": cat,
-        "confidence": conf, "reason": row.get("reason") or "",
+        "confidence": conf, "confidence_original": conf_orig,
+        "reason": row.get("reason") or "",
         "evidence": (row.get("evidence") or "")[:80],
         "action": action, "kind": kind,
         "size": int(row.get("size") or 0), "ext": ext,

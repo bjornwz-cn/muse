@@ -1,0 +1,1 @@
+{"51248":{"evidence":"mov local header bytes=00000000; mov region nonzero 3523397/4663025; ftyp absent after mov offset; still HEIF 3024x4032 PIL-verified; zip CRC fail on both entries","reason":"livp mov entry destroyed: local header zeroed, mov region head zeros, no ftyp in file; still image recoverable but video part destroyed — partial damage, delete per damaged rule"}}

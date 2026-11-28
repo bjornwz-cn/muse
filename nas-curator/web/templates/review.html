@@ -14,17 +14,26 @@
       <option value="ambiguous">待确认</option>
       <option value="sensitive">敏感</option>
       <option value="shell">空壳</option>
+      <option value="unreadable">不可读</option>
+      <option value="unsupported">不支持</option>
+      <option value="no_text">无正文</option>
     </select>
   </label>
+  <label class="check" style="margin:0"><input type="checkbox" id="show-misc"> 显示杂项（不可读/不支持/无正文）</label>
   <button class="btn ghost small" id="btn-refresh" type="button">刷新</button>
   <span style="flex:1"></span>
   <label class="check" style="margin:0"><input type="checkbox" id="select-all"> 全选</label>
-  <button class="btn small" id="btn-bulk-approve" type="button">批量批准</button>
+  <button class="btn small" id="btn-bulk-approve" type="button">按建议批准</button>
   <button class="btn ghost small" id="btn-bulk-reject" type="button">批量拒绝</button>
 </div>
 
 <div id="review-error"></div>
 <div id="review-list"><p class="loading">加载中…</p></div>
+<div class="btn-row" id="pager" style="margin-top:12px" hidden>
+  <button class="btn ghost small" id="btn-prev-page" type="button">上一页</button>
+  <span class="muted" id="page-info"></span>
+  <button class="btn ghost small" id="btn-next-page" type="button">下一页</button>
+</div>
 {% endblock %}
 {% block scripts %}
 <script>
@@ -32,13 +41,17 @@
   var C = window.Curator;
   var listEl = document.getElementById('review-list');
   var countEl = document.getElementById('pending-count');
+  var pagerEl = document.getElementById('pager');
+  var pageInfoEl = document.getElementById('page-info');
+  var PAGE_SIZE = 20;
+  var folderOffset = 0;  /* 文件夹分组分页 offset */
 
-  function categoryOptions(currentTop) {
-    /* 0.1.2：下拉默认 = 文件当前顶层（后端 current_top），不再固定选中第一个「工作」。
+  function categoryOptions(defaultTop) {
+    /* 0.2.5：下拉默认 = 建议目标的顶层（有建议目标时），否则文件当前顶层；
        当前顶层若不是三库之一（如收件箱/笔记本备份），也作为首选项保留；
        其余为可改到的三库顶层。改顶层后批准会重算目标路径。 */
     var libs = ['工作', '家庭', '媒体'];
-    var opts = [currentTop || '工作'];
+    var opts = [defaultTop || '工作'];
     libs.forEach(function (l) { if (l !== opts[0]) opts.push(l); });
     return opts.map(function (o, i) {
       return '<option value="' + C.esc(o) + '"' + (i === 0 ? ' selected' : '') + '>' + C.esc(o) + '</option>';
@@ -53,11 +66,26 @@
       encodeURIComponent(path) + '">' + C.esc(path) + '</a>';
   }
 
+  function suggestBadge(it) {
+    /* 0.2.5 §3.3：原始置信度 >= review_suggest 为“建议批准”，否则“需人工判断”。 */
+    if (it.suggest_level === 'suggest') {
+      return '<span class="tag" style="background:#e6f4ea;color:#137333">建议批准</span>';
+    }
+    return '<span class="tag" style="background:#fef7e0;color:#b06000">需人工判断</span>';
+  }
+
   function itemHtml(it) {
     var p = it.payload || {};
     var src = p.src || it.src || '';
+    /* 0.2.5 §2.5：显示原始置信度（confidence_original），不再把被守卫压到
+       0.45 的值当置信度显示；两者不同时标注被压过的值。 */
+    var confOrig = (p.confidence_original != null ? p.confidence_original : p.confidence);
+    var confNote = '';
+    if (p.confidence != null && confOrig != null && Number(p.confidence) !== Number(confOrig)) {
+      confNote = '<span class="muted">（曾被压到 ' + Math.round(Number(p.confidence) * 100) + '%）</span>';
+    }
     return '<article class="review-item" data-id="' + C.esc(it.id) + '">' +
-      '<p class="review-note">需要你决定：' + C.esc(it.review_note || '请看一眼再决定') + '</p>' +
+      '<p class="review-note">需要你决定：' + C.esc(it.review_note || '请看一眼再决定') + ' ' + suggestBadge(it) + '</p>' +
       '<div class="head">' +
         '<input type="checkbox" class="review-check" value="' + C.esc(it.id) + '" aria-label="选中此条">' +
         '<span class="path">' + fileLink(src) + '</span>' +
@@ -65,7 +93,7 @@
       '</div>' +
       '<div style="margin-top:8px;display:flex;gap:16px;flex-wrap:wrap;align-items:center">' +
         '<span>建议分类：<strong>' + C.esc(p.category || '—') + '</strong></span>' +
-        C.confBar(p.confidence) +
+        C.confBar(confOrig) + confNote +
       '</div>' +
       '<p style="margin:8px 0 0">' + C.esc(p.reason || '') + '</p>' +
       '<p style="margin:4px 0 0">当前所在：<strong>' + C.esc(it.current_top || '—') + '</strong>' +
@@ -73,7 +101,7 @@
       (p.evidence ? '<p class="evidence" style="margin:4px 0 0">依据：' + fileLink(p.evidence) + '</p>' : '') +
       (p.suggested_dst ? '<p class="dst" style="margin:4px 0 0">建议目标：' + C.esc(p.suggested_dst) + '</p>' : '') +
       '<div class="review-edit">' +
-        '<div><label>改分类</label><select class="edit-category inline-input">' + categoryOptions(it.current_top) + '</select></div>' +
+        '<div><label>改分类</label><select class="edit-category inline-input">' + categoryOptions(it.suggested_top || it.current_top) + '</select></div>' +
         '<div><label>改名（留空则不改名）</label><input type="text" class="edit-name inline-input" placeholder="新文件名"></div>' +
         '<div><label>打标签（逗号分隔）</label><input type="text" class="edit-tags inline-input" placeholder="如：合同,2026" value="' + C.esc((p.tags || []).join(',')) + '"></div>' +
       '</div>' +
@@ -115,6 +143,9 @@
       return C.kindTag(k) + ' ×' + g.kinds[k];
     }).join(' ');
     var where = g.top_label + (g.path ? ' / ' + g.path : '');
+    var moreBtn = g.has_more
+      ? '<button class="btn ghost small btn-folder-more" type="button" data-loaded="' + g.items.length + '">加载更多（共 ' + g.count + ' 条）</button>'
+      : '';
     return '<section class="folder-card" data-folder="' + C.esc(g.folder) + '">' +
       '<div class="folder-head">' +
         '<button class="folder-toggle" type="button" aria-label="展开/收起">▸</button>' +
@@ -128,7 +159,7 @@
         '<button class="btn ghost small btn-folder-reject" type="button">拒绝整包</button>' +
         '<span class="muted">整包决定对该文件夹下全部待复核项生效。</span>' +
       '</div>' +
-      '<div class="folder-items" hidden>' + g.items.map(itemHtml).join('') + '</div>' +
+      '<div class="folder-items" hidden>' + g.items.map(itemHtml).join('') + moreBtn + '</div>' +
     '</section>';
   }
 
@@ -165,15 +196,55 @@
     }
   }
 
+  async function folderMore(card, btn) {
+    /* 0.2.5 §5.1：组内超过 20 条时按文件夹续取。 */
+    var folder = card.getAttribute('data-folder');
+    var loaded = parseInt(btn.getAttribute('data-loaded') || '0', 10);
+    var kind = document.getElementById('kind-filter').value;
+    var hideMisc = !document.getElementById('show-misc').checked;
+    var q = '/api/review?status=pending&folder=' + encodeURIComponent(folder) +
+      '&limit=50&offset=' + loaded +
+      (kind ? '&kind=' + encodeURIComponent(kind) : '') +
+      (hideMisc ? '&hide_misc=1' : '');
+    btn.disabled = true;
+    try {
+      var res = await C.api(q);
+      var itemsEl = card.querySelector('.folder-items');
+      var html = (res.items || []).map(itemHtml).join('');
+      btn.insertAdjacentHTML('beforebegin', html);
+      var nowLoaded = loaded + (res.items || []).length;
+      btn.setAttribute('data-loaded', String(nowLoaded));
+      if (nowLoaded >= (res.total || 0)) btn.remove();
+      else btn.disabled = false;
+    } catch (e) {
+      btn.disabled = false;
+      C.toast('加载更多失败：' + e.message, true);
+    }
+  }
+
   async function load() {
     listEl.innerHTML = '<p class="loading">加载中…</p>';
     try {
       var kind = document.getElementById('kind-filter').value;
-      var q = '/api/review/folders?status=pending' + (kind ? '&kind=' + encodeURIComponent(kind) : '');
-      var groups = await C.api(q);
-      var total = groups.reduce(function (n, g) { return n + (g.count || 0); }, 0);
-      countEl.textContent = total;
+      var hideMisc = !document.getElementById('show-misc').checked;
+      var q = '/api/review/folders?status=pending&limit=' + PAGE_SIZE + '&offset=' + folderOffset +
+        (kind ? '&kind=' + encodeURIComponent(kind) : '') +
+        (hideMisc ? '&hide_misc=1' : '');
+      var res = await C.api(q);
+      var groups = res.groups || [];
+      countEl.textContent = res.total_items != null ? res.total_items : 0;
       listEl.innerHTML = groups.length ? groups.map(folderHtml).join('') : '<p class="empty">复核队列已空 🎉</p>';
+      var totalGroups = res.total || 0;
+      if (totalGroups > PAGE_SIZE) {
+        pagerEl.hidden = false;
+        var pageNo = Math.floor(folderOffset / PAGE_SIZE) + 1;
+        var pageCount = Math.ceil(totalGroups / PAGE_SIZE);
+        pageInfoEl.textContent = '第 ' + pageNo + ' / ' + pageCount + ' 页（共 ' + totalGroups + ' 个文件夹）';
+        document.getElementById('btn-prev-page').disabled = folderOffset <= 0;
+        document.getElementById('btn-next-page').disabled = folderOffset + PAGE_SIZE >= totalGroups;
+      } else {
+        pagerEl.hidden = true;
+      }
     } catch (e) {
       C.showError(document.getElementById('review-error'), e);
       listEl.innerHTML = '';
@@ -181,6 +252,11 @@
   }
 
   listEl.addEventListener('click', async function (ev) {
+    var moreBtn = ev.target.closest('.btn-folder-more');
+    if (moreBtn) {
+      await folderMore(ev.target.closest('.folder-card'), moreBtn);
+      return;
+    }
     var fbtn = ev.target.closest('.btn-folder-approve, .btn-folder-reject');
     if (fbtn) {
       var card = ev.target.closest('.folder-card');
@@ -214,21 +290,36 @@
   async function bulk(decision) {
     var ids = C.selectedValues('review-check');
     if (!ids.length) { C.toast('请先勾选要批量处理的条目', true); return; }
+    /* 0.2.5 §3.2：按建议批准——不传 category，走各条 payload.suggested_dst；
+       批准前确认一次（会移动文件）。 */
+    if (decision === 'approved' &&
+        !window.confirm('确定按建议批准选中的 ' + ids.length + ' 条吗？批准后按建议目标移动文件；重复项进重复待确认区，不删除。')) return;
     try {
       var res = await C.api('/api/review/bulk', { method: 'POST', body: { ids: ids, decision: decision } });
-      (res.results || ids.map(function (id) { return { id: id, ok: true }; })).forEach(function (r) {
-        if (r.ok) removeItem(r.id);
-      });
-      C.toast('批量' + (decision === 'approved' ? '批准' : '拒绝') + '完成');
+      var moved = 0;
+      (res.results || []).forEach(function (r) { if (r.ok && r.moved) moved += 1; });
+      C.toast('批量' + (decision === 'approved' ? '批准' : '拒绝') + '完成' +
+        (decision === 'approved' ? '（已移动 ' + moved + ' 个文件）' : ''));
+      await load();
     } catch (e) {
       C.toast('批量操作失败：' + e.message, true);
     }
   }
 
-  document.getElementById('kind-filter').addEventListener('change', load);
+  document.getElementById('kind-filter').addEventListener('change', function () { folderOffset = 0; load(); });
+  document.getElementById('show-misc').addEventListener('change', function () { folderOffset = 0; load(); });
   document.getElementById('btn-refresh').addEventListener('click', load);
   document.getElementById('btn-bulk-approve').addEventListener('click', function () { bulk('approved'); });
   document.getElementById('btn-bulk-reject').addEventListener('click', function () { bulk('rejected'); });
+  document.getElementById('btn-prev-page').addEventListener('click', function () {
+    if (folderOffset <= 0) return;
+    folderOffset = Math.max(0, folderOffset - PAGE_SIZE);
+    load();
+  });
+  document.getElementById('btn-next-page').addEventListener('click', function () {
+    folderOffset += PAGE_SIZE;
+    load();
+  });
   C.bindSelectAll('select-all', 'review-check');
   load();
 })();

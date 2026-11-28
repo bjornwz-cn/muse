@@ -173,7 +173,9 @@ def test_plan_rules_only():
             it = by_src(items, name)
             assert it["category"] == "99-待确认/空壳", (name, it)
             assert it["action"] == "review" and it["review_kind"] == "shell", (name, it)
-            assert it["dst"] == "" and it["confidence"] < 0.60, (name, it)
+            # 0.2.5 §3.2：review 项保留 dst 作建议目标（批量批准靠它搬文件）。
+            assert it["dst"] == os.path.join(root, it["category"], it["new_name"]), (name, it)
+            assert it["confidence"] < 0.60, (name, it)
         # 扫描件（无文本层）进 review/ambiguous
         it = by_src(items, "扫描件-20240101.pdf")
         assert it["action"] == "review" and it["review_kind"] == "ambiguous", it
@@ -197,7 +199,9 @@ def test_plan_rules_only():
                                "reason", "evidence", "action", "kind", "size",
                                "ext", "sha256", "tags", "review_kind", "file_id",
                                # P2(P1.1)：score（plan CSV 用）与 auto_exempt（unit 豁免）
-                               "score", "auto_exempt"}, it
+                               "score", "auto_exempt",
+                               # 0.2.5 §3.2：confidence_original（压之前的原始置信度）
+                               "confidence_original"}, it
             assert isinstance(it["tags"], list)
             assert it["confidence"] <= 1.0
         assert stats["review"] >= 8, stats

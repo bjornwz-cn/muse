@@ -121,6 +121,9 @@ def get_settings() -> dict:
     media_cfg = load_media_config()
     thresholds = dict(cfg.get("thresholds") or {})
     thresholds.setdefault("auto", 0.85)
+    thresholds.setdefault("auto_doc_llm", 0.75)
+    thresholds.setdefault("auto_media", 0.65)
+    thresholds.setdefault("auto_media_margin", 0.15)
     thresholds.setdefault("review_suggest", 0.60)
     me = dict(cfg.get("model_endpoints") or {})
     # 0.1.5：向量模型独立配置（embedding_model 只读 host=SEM_HOST）；

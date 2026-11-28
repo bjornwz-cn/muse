@@ -99,6 +99,6 @@ def test_review_approve_moves_file(client):
     d = _wait_job(c, r.json()["job_id"])
     plan_id = d["plan"]["id"]
     # 复核队列里应有内容（发票高置信是 move；用 plan 明细直接查 review 项）
-    rows = c.get("/api/review?status=pending").json()
+    rows = c.get("/api/review?status=pending").json()["items"]
     assert isinstance(rows, list)
     print("review approve: PASS（队列 %d 条）" % len(rows))

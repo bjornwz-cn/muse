@@ -36,6 +36,39 @@ def init_db(path: str | None = None) -> str:
         cols_op = [r[1] for r in conn.execute("PRAGMA table_info(operations)")]
         if "decided_by" not in cols_op:
             conn.execute("ALTER TABLE operations ADD COLUMN decided_by TEXT")
+        # 2026-11-28 0.2.5 §3.4：review_queue.kind 细分出 unreadable /
+        # unsupported / no_text 三类杂项。旧库的 CHECK 约束不含新值，SQLite
+        # 不支持 ALTER CHECK，须重建表（12 步标准流程）；新库 schema.sql
+        # 已含新值时本段跳过。重建只换约束不丢行。
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type='table' AND name='review_queue'").fetchone()
+        if row and "'unreadable'" not in (row[0] or ""):
+            conn.executescript("""
+                PRAGMA foreign_keys=OFF;
+                BEGIN TRANSACTION;
+                CREATE TABLE review_queue_new (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    file_id    INTEGER REFERENCES files (id),
+                    plan_id    INTEGER REFERENCES plans (id),
+                    kind       TEXT NOT NULL CHECK (kind IN ('low_conf', 'dup', 'blur', 'ambiguous', 'shell', 'sensitive', 'unreadable', 'unsupported', 'no_text')),
+                    payload    TEXT,
+                    status     TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected')) DEFAULT 'pending',
+                    decided_by TEXT,
+                    decided_at TEXT,
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
+                );
+                INSERT INTO review_queue_new
+                    SELECT id, file_id, plan_id, kind, payload, status,
+                           decided_by, decided_at, created_at
+                    FROM review_queue;
+                DROP TABLE review_queue;
+                ALTER TABLE review_queue_new RENAME TO review_queue;
+                CREATE INDEX IF NOT EXISTS idx_review_status
+                    ON review_queue (status);
+                COMMIT;
+                PRAGMA foreign_keys=ON;
+            """)
         conn.commit()
     finally:
         conn.close()

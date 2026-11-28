@@ -56,7 +56,10 @@ def _is_skip_exc(e):
 
 PLAN_KEYS = {"src", "dst", "new_name", "category", "confidence", "reason",
              "evidence", "action", "kind", "size", "ext", "sha256", "tags",
-             "review_kind", "file_id", "score", "auto_exempt"}
+             "review_kind", "file_id", "score", "auto_exempt",
+             "confidence_original", "exif_placed"}
+# 0.2.5 补：engine._base_item 新增 "confidence_original"（压之前的原始置信度）
+# 与 "exif_placed"（EXIF 年/月定位置放）。
 # 0.1.8 补：engine._base_item 自 0.1.1 起就出 "score" 与 "auto_exempt"
 # （plan_items 表亦有此二列），旧 PLAN_KEYS 漏了它们，PIL 齐全的环境
 # 下 test_plan_media_files_no_classifier 的精确键集断言必失败；

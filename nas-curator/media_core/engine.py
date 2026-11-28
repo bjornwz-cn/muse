@@ -30,10 +30,15 @@ classifier，不在内部构造、不触发任何模型加载。
    "action": "move"|"rename"|"tag"|"skip"|"review",
    "kind": "media", "size": int, "ext": str, "sha256": str,
    "tags": list[str], "review_kind": str|None, "file_id": int|None}
-  * kind 恒为 "media"；action="review" 时 dst=""，review_kind 取值
-    low_conf|dup|blur|ambiguous（shell 预留给 iCloud 占位符，本层不产生）。
+  * kind 恒为 "media"；action="review" 时 dst 保留作建议目标（0.2.5 §3.2，
+    不再清空），review_kind 取值 low_conf|dup|blur|ambiguous（shell 预留给
+    iCloud 占位符，本层不产生）。
   * confidence：接受的分类用 top1；待确认用 top1（封顶 0.45）；模糊用 0.3；
     重复用 0.9（SHA256 精确）或 0.8（dHash 近重复）。
+    confidence_original 为压之前的原始值（供前端显示与重分类重评）。
+  * EXIF 年/月归档（0.2.5 §3.7）：有拍摄日期的新文件按 照片/视频/<年>/
+    <年-月>/ 归位，内容分类只写 tags；exif_placed=True 的项归位目标是
+    确定性结论，自动执行门槛按 0.0 计。
   * tags 由 common.tags.gen_media_tags 生成（取其返回的标签名列表）。
 """
 from __future__ import annotations
@@ -68,6 +73,21 @@ try:
     from common.tags import gen_media_tags as _gen_media_tags
 except Exception:  # common 层不可用时降级为本地同义实现
     _gen_media_tags = None
+
+try:
+    from common.tags import exif_datetime as _exif_datetime
+except Exception:  # common 层不可用时 EXIF 归档关闭
+    _exif_datetime = None
+
+
+def _exif_year_month(path):
+    """EXIF 拍摄日期 -> (year, month)；读不到返回 None（0.2.5 §3.7）。"""
+    if _exif_datetime is None:
+        return None
+    try:
+        return _exif_datetime(path)
+    except Exception:
+        return None
 
 __all__ = [
     "plan_media_files",
@@ -145,6 +165,7 @@ def _base_item(src, name, kind_cn, size, ext, sha256=""):
         "new_name": name,
         "category": "",
         "confidence": 0.0,
+        "confidence_original": 0.0,
         "reason": "",
         "evidence": "",
         "action": "review",
@@ -158,18 +179,28 @@ def _base_item(src, name, kind_cn, size, ext, sha256=""):
         # P2(P1.1)：与文档 plan-item 同形；媒体无规则分，score 恒 0；无 unit，恒不豁免。
         "score": 0,
         "auto_exempt": False,
+        # 0.2.5 §3.7：EXIF 年/月定位置放（归位目标由拍摄日期决定）。
+        "exif_placed": False,
     }
 
 
-def _review_item(base, category, confidence, reason, evidence, review_kind, kind_cn):
+def _review_item(base, category, confidence, reason, evidence, review_kind, kind_cn,
+                 suggested_dst="", confidence_original=None, tag_category=None):
+    """0.2.5 §3.2：review 项保留 dst 作建议目标（不再清空）；保留原始置信度
+    （confidence_original；未给时等于 confidence）。tag_category 给定时，
+    内容猜测类目也写进 tags（内容分类只写标签）。"""
     base.update({
-        "dst": "",
+        "dst": suggested_dst or "",
         "category": category,
         "confidence": float(confidence),
+        "confidence_original": (float(confidence_original)
+                                if confidence_original is not None
+                                else float(confidence)),
         "reason": reason,
         "evidence": evidence,
         "action": "review",
-        "tags": _media_tag_names("", kind_cn),
+        "tags": _media_tag_names(tag_category if tag_category is not None else "",
+                                 kind_cn),
         "review_kind": review_kind,
     })
     return base
@@ -380,7 +411,9 @@ def plan_media_files(paths, cfg, *, classifier=None, index=None, library_root=No
         if note or not frames:
             item = _review_item(_base_item(path, name, kind_cn, size, ext, sha),
                                 "待确认", 0.0, "decode_failed:%s" % (note or "noframe"),
-                                "", "ambiguous", kind_cn)
+                                "", "ambiguous", kind_cn,
+                                suggested_dst=os.path.join(
+                                    lib_root, target_dir(eff, kind_cn, "待确认"), name))
             items.append(item)
             stats["decode_failed"] += 1
             stats["review"] += 1
@@ -391,7 +424,9 @@ def plan_media_files(paths, cfg, *, classifier=None, index=None, library_root=No
         if kind_cn == "照片" and blur < th["blur_min"]:
             item = _review_item(_base_item(path, name, kind_cn, size, ext, sha),
                                 "模糊", 0.3, "blurry:%.1f" % blur,
-                                "", "blur", kind_cn)
+                                "", "blur", kind_cn,
+                                suggested_dst=os.path.join(
+                                    lib_root, target_dir(eff, kind_cn, "模糊"), name))
             items.append(item)
             stats["blurry"] += 1
             stats["review"] += 1
@@ -400,7 +435,9 @@ def plan_media_files(paths, cfg, *, classifier=None, index=None, library_root=No
         # 5) 内容分类（classifier=None 时分类字段留空进 review）。
         if classifier is None:
             item = _review_item(_base_item(path, name, kind_cn, size, ext, sha),
-                                "", 0.0, "no_classifier", "", "ambiguous", kind_cn)
+                                "", 0.0, "no_classifier", "", "ambiguous", kind_cn,
+                                suggested_dst=os.path.join(
+                                    lib_root, target_dir(eff, kind_cn, "待确认"), name))
             items.append(item)
             stats["no_classifier"] += 1
             stats["review"] += 1
@@ -428,31 +465,72 @@ def plan_media_files(paths, cfg, *, classifier=None, index=None, library_root=No
             evidence += " learn:rule#" + ",".join(map(str, fired_ids))
 
         if why == "accepted":
-            rel = target_dir(eff, kind_cn, cat)
+            # 0.2.5 §3.7：有 EXIF 拍摄日期时按年/月归档（照片/视频/<年>/<年-月>/），
+            # 内容分类只写标签（tags），不影响归位；无 EXIF 时沿用类目目录。
+            exif_ym = _exif_year_month(path)
+            if exif_ym is not None:
+                year, month = exif_ym
+                rel = "%s/%d/%d-%02d" % (kind_cn, year, year, month)
+                reason = "exif:%d-%02d;siglip:%.2f" % (year, month, s1)
+                exif_placed = True
+            else:
+                rel = target_dir(eff, kind_cn, cat)
+                reason = "siglip:%.2f" % s1
+                exif_placed = False
             item = _base_item(path, name, kind_cn, size, ext, sha)
             item.update({
                 "dst": os.path.join(lib_root, rel, name),
                 "category": cat,
                 "confidence": float(s1),
-                "reason": "siglip:%.2f" % s1,
+                "confidence_original": float(s1),
+                "reason": reason,
                 "evidence": evidence,
                 "action": "move",
                 "tags": _media_tag_names(cat, kind_cn),
                 "review_kind": None,
+                "exif_placed": exif_placed,
             })
             items.append(item)
             stats["accepted"] += 1
             continue
 
-        # 低置信 → review（decide 已返回 cat='待确认'）。
+        # 低置信 → review（decide 已返回 cat='待确认'），但有 EXIF 拍摄日期时
+        # 仍可按年/月定位置放（0.2.5 §3.7）：归位目标由日期决定，不依赖内容
+        # 判断；内容猜测（top1）只写标签与 category 元数据。
+        exif_ym = _exif_year_month(path)
+        if exif_ym is not None and cat2 and cat2 != "待确认":
+            year, month = exif_ym
+            rel = "%s/%d/%d-%02d" % (kind_cn, year, year, month)
+            item = _base_item(path, name, kind_cn, size, ext, sha)
+            item.update({
+                "dst": os.path.join(lib_root, rel, name),
+                "category": cat2,
+                "confidence": float(s1),
+                "confidence_original": float(s1),
+                "reason": "exif:%d-%02d;low:%.2f" % (year, month, s1),
+                "evidence": evidence,
+                "action": "move",
+                "tags": _media_tag_names(cat2, kind_cn),
+                "review_kind": None,
+                "exif_placed": True,
+            })
+            items.append(item)
+            stats["accepted"] += 1
+            continue
         margin = s1 - s2
         if margin < th["margin_min"]:
             reason = "low:margin:%.2f" % margin
         else:
             reason = "low:score:%.2f" % s1
+        suggested = ""
+        if cat2 and cat2 != "待确认":
+            suggested = os.path.join(lib_root, target_dir(eff, kind_cn, cat2), name)
         item = _review_item(_base_item(path, name, kind_cn, size, ext, sha),
                             "待确认", min(float(s1), 0.45), reason, evidence,
-                            "low_conf", kind_cn)
+                            "low_conf", kind_cn,
+                            suggested_dst=suggested,
+                            confidence_original=float(s1),
+                            tag_category=cat2 if cat2 != "待确认" else None)
         items.append(item)
         stats["low_conf"] += 1
         stats["review"] += 1

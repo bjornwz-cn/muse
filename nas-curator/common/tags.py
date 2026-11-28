@@ -9,7 +9,10 @@
 """
 from __future__ import annotations
 
+import datetime
+import os
 import re
+import struct
 
 # v3.1.1 文件名业务类型优先词表（与 curator_core.best_category 共用同一份语义）。
 BUSINESS_TYPES = [
@@ -28,6 +31,79 @@ def match_business_types(name):
     hits = [w for w in BUSINESS_TYPES if w in name]
     hits.sort(key=len, reverse=True)
     return hits
+
+
+def _mp4_creation_ym(path):
+    """mp4/mov mvhd creation_time（自 1904-01-01 的秒数，UTC）-> (year, month)。
+    moov 可能在文件头或尾，各扫 1MB；找不到或无效返回 None。"""
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return None
+    chunks = []
+    try:
+        with open(path, "rb") as f:
+            chunks.append(f.read(1024 * 1024))
+            if size > 1024 * 1024:
+                f.seek(max(0, size - 1024 * 1024))
+                chunks.append(f.read())
+    except OSError:
+        return None
+    for buf in chunks:
+        idx = buf.find(b"mvhd")
+        while idx != -1:
+            try:
+                ver = buf[idx + 4]
+                if ver == 1:
+                    ts = struct.unpack(">Q", buf[idx + 8:idx + 16])[0]
+                else:
+                    ts = struct.unpack(">I", buf[idx + 8:idx + 12])[0]
+                base = datetime.datetime(1904, 1, 1, tzinfo=datetime.timezone.utc)
+                dt = base + datetime.timedelta(seconds=ts)
+                if 2000 <= dt.year <= 2030:
+                    return (dt.year, dt.month)
+            except Exception:
+                pass
+            idx = buf.find(b"mvhd", idx + 4)
+    return None
+
+
+def exif_datetime(path):
+    """读拍摄日期 (year, month)：照片读 EXIF DateTimeOriginal（无则 DateTime）；
+    视频读 mp4/mov mvhd creation_time。都读不到返回 None。
+    PIL 为懒加载（容器已装，pillow_heif 负责 HEIC）；任何失败返回 None，不抛错。
+    年份限定 2000–2030、月份 1–12，超出视为无效（相机时钟错）。"""
+    if not path or not isinstance(path, str):
+        return None
+    ext = os.path.splitext(path)[1].lower()
+    _PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp",
+                   ".tif", ".tiff"}
+    _VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".3gp"}
+    if ext in _PHOTO_EXTS:
+        try:
+            import pillow_heif  # noqa: F401 - 注册 HEIC opener
+        except Exception:
+            pass
+        try:
+            from PIL import Image
+            with Image.open(path) as im:
+                exif = im._getexif() or {}
+                raw = exif.get(36867) or exif.get(306)  # DateTimeOriginal / DateTime
+                if raw:
+                    parts = str(raw).replace("-", ":").split(":")
+                    if len(parts) >= 2:
+                        y, m = int(parts[0]), int(parts[1])
+                        if 2000 <= y <= 2030 and 1 <= m <= 12:
+                            return (y, m)
+        except Exception:
+            return None
+        return None
+    if ext in _VIDEO_EXTS:
+        try:
+            return _mp4_creation_ym(path)
+        except Exception:
+            return None
+    return None
 
 
 def extract_year(name="", text="", mtime=None):

@@ -151,7 +151,7 @@ def test_folders_endpoint_groups_pending(client):
     _seed_grouping(client)
     r = client.get("/api/review/folders", params={"status": "pending"})
     assert r.status_code == 200, r.text
-    groups = {g["folder"]: g for g in r.json()}
+    groups = {g["folder"]: g for g in r.json()["groups"]}
     assert set(groups) == {"mac-backup:项目开发",
                            "mac-backup:下载/PaddleOCR-3.7.0",
                            "family:刘音"}, groups.keys()
@@ -169,7 +169,7 @@ def test_folders_endpoint_kind_filter(client):
     _seed_grouping(client)
     r = client.get("/api/review/folders",
                    params={"status": "pending", "kind": "blur"})
-    groups = {g["folder"]: g for g in r.json()}
+    groups = {g["folder"]: g for g in r.json()["groups"]}
     assert set(groups) == {"mac-backup:项目开发",
                            "mac-backup:下载/PaddleOCR-3.7.0",
                            "family:刘音"}
@@ -177,7 +177,7 @@ def test_folders_endpoint_kind_filter(client):
     assert groups["mac-backup:项目开发"]["kinds"] == {"blur": 2}
     r = client.get("/api/review/folders",
                    params={"status": "pending", "kind": "low_conf"})
-    groups = {g["folder"]: g for g in r.json()}
+    groups = {g["folder"]: g for g in r.json()["groups"]}
     assert set(groups) == {"mac-backup:项目开发"}
     assert groups["mac-backup:项目开发"]["count"] == 1
     print("folders endpoint kind filter: PASS")
@@ -186,15 +186,15 @@ def test_folders_endpoint_kind_filter(client):
 def test_folders_endpoint_status_all(client):
     _seed_grouping(client)
     # 先裁定一条（拒绝），status=pending 应少一条，status=all 应全在
-    rows = client.get("/api/review", params={"status": "pending"}).json()
+    rows = client.get("/api/review", params={"status": "pending"}).json()["items"]
     rid = rows[0]["id"]
     r = client.post(f"/api/review/{rid}/decide", json={"decision": "rejected"})
     assert r.status_code == 200, r.text
     pending = client.get("/api/review/folders",
-                         params={"status": "pending"}).json()
+                         params={"status": "pending"}).json()["groups"]
     assert sum(g["count"] for g in pending) == 4
     all_rows = client.get("/api/review/folders",
-                          params={"status": "all"}).json()
+                          params={"status": "all"}).json()["groups"]
     assert sum(g["count"] for g in all_rows) == 5
     print("folders endpoint status=all: PASS")
 
@@ -225,7 +225,7 @@ def test_folder_approve_moves_whole_folder(client):
         dst = client._tmp / "工作文件" / "项目开发" / "企业固定资产管理系统" / "res" / name
         assert dst.exists() and dst.read_bytes() == data, dst
     assert not (res_dir / "a.png").exists() and not (res_dir / "b.png").exists()
-    rows = client.get("/api/review", params={"status": "pending"}).json()
+    rows = client.get("/api/review", params={"status": "pending"}).json()["items"]
     assert rows == []
     print("folder approve moves whole folder: PASS")
 

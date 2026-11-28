@@ -72,7 +72,8 @@ def test_path_prior_guard():
               "auto_exempt": False}]
     out, info = RT.apply_path_prior_guard(items, ROOTS, 0.85)
     assert info["guarded"] == 1
-    assert out[0]["action"] == "review" and out[0]["dst"] == ""
+    assert out[0]["action"] == "review" and out[0]["dst"] != ""
+    assert out[0]["dst"] == "/vol1/1000/工作文件/09-会议与汇报/x.jpg"
     assert out[0]["review_kind"] == "low_conf"
     assert out[0]["confidence"] == 0.45
     assert "path-prior" in out[0]["reason"]
@@ -101,7 +102,9 @@ def test_path_prior_guard():
               "auto_exempt": True}]
     out, info = RT.apply_path_prior_guard(items, ROOTS, 0.85)
     assert info["guarded"] == 1 and out[0]["action"] == "review"
-    assert out[0]["review_kind"] == "low_conf" and out[0]["dst"] == ""
+    # 0.2.5 §3.2：守卫不再清空 dst，保留作建议目标（批量批准靠它搬文件）。
+    assert out[0]["review_kind"] == "low_conf" and out[0]["dst"] != ""
+    assert out[0]["dst"] == "/vol1/1000/工作文件/12-项目资料/项目"
     # 高置信 unit 跨顶层：路径先验不拦（置信度够），但自动执行门控会拦（见
     # test_apply_gating），此处只确认路径先验本身不因 unit 身份放行低置信项
     items = [{"src": "/vol1/1000/下载/Wangzhen-Mac/项目",
@@ -219,7 +222,9 @@ def test_review_list_current_top(client):
         "reason": "no-text:待确认", "evidence": "", "suggested_dst": "", "tags": []})
     r = client.get("/api/review?status=pending")
     assert r.status_code == 200, r.text
-    rows = [x for x in r.json() if x["id"] == rid]
+    # 0.2.5 §5.1：列表接口分页返回 {"items", "total", "limit", "offset"}。
+    assert r.json()["total"] == 1
+    rows = [x for x in r.json()["items"] if x["id"] == rid]
     assert len(rows) == 1
     # 注意：fixture 的库根是 tmp 路径，线上 /vol1 路径认不出顶层；
     # 这里只断言字段存在且为字符串（真实映射由 test_library_top 覆盖）。
@@ -238,7 +243,7 @@ def test_review_list_current_top_tmp_roots(client):
         "src": str(src), "category": "99-待确认/04-低置信", "confidence": 0.4,
         "reason": "no-text:待确认", "evidence": "", "suggested_dst": "", "tags": []})
     r = client.get("/api/review?status=pending")
-    rows = [x for x in r.json() if x["id"] == rid]
+    rows = [x for x in r.json()["items"] if x["id"] == rid]
     assert rows[0]["current_top"] == "家庭", rows[0]
     assert rows[0]["current_top_id"] == "family"
     print("review list current_top(tmp): PASS")

@@ -65,5 +65,5 @@ HEALTHCHECK --interval=60s --timeout=10s --start-period=120s --retries=3 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/dashboard', timeout=5)"
 LABEL org.opencontainers.image.title="NAS Curator" \
       org.opencontainers.image.description="文件管家：统一整理 NAS 文档与媒体库（飞牛 App）" \
-      org.opencontainers.image.version="0.2.4"
+      org.opencontainers.image.version="0.2.5"
 ENTRYPOINT ["/app/entrypoint.sh"]

@@ -160,21 +160,20 @@ def _setup_models(args, rules):
 
 
 def _apply_path_guard(items, cfg):
-    """0.1.2 路径强信号：低置信（< auto 阈值）建议不得跨顶层移动。
+    """0.1.2 路径强信号：低置信（< 按项取的分模态阈值）建议不得跨顶层移动。
 
     在 _dispatch_plan 的三个返回点统一跑（文档/媒体/混合输入源全覆盖）。
     只改建议，不动文件；被拦下的项数打印一行。
+    0.2.5：守卫按项取阈值（LLM 文档 0.75、媒体 0.65、规则分文档 0.85）；
+    收件箱/输入源 -> 三库是正常归位，低于门槛只转复核、保留建议目标。
     """
     from common import routing as RT
     roots = RT.roots_from_config(cfg)
-    threshold = ((cfg or {}).get("thresholds") or {}).get("auto", 0.85)
-    try:
-        threshold = float(threshold)
-    except (TypeError, ValueError):
-        threshold = 0.85
-    items, info = RT.apply_path_prior_guard(items, roots, threshold)
+    thresholds = (cfg or {}).get("thresholds") or {}
+    items, info = RT.apply_path_prior_guard(items, roots, thresholds=thresholds)
     if info.get("guarded"):
-        print(f"  路径先验：{info['guarded']} 项低置信跨顶层建议已转复核")
+        print(f"  路径先验：{info['guarded']} 项低置信跨顶层建议已转复核"
+              f"（其中 {info.get('kept_dst', 0)} 项保留建议目标）")
     return items
 
 
@@ -473,6 +472,7 @@ def _store_plan(conn, library_id, rules_version, items):
     同一 src 已有 pending 或已裁决（approved/rejected）行时跳过建行——
     watcher 对同一批文件重复建计划不再产生第二条待处理行；plan_items
     审计行照常记。"""
+    from common import routing as RT
     summary = {"n": len(items),
                "move": sum(1 for i in items if i.get("action") == "move"),
                "rename": sum(1 for i in items if i.get("action") == "rename"),
@@ -492,9 +492,11 @@ def _store_plan(conn, library_id, rules_version, items):
                 DB.refresh_review_fingerprint(conn, it.get("src"), size, mtime)
                 continue
             DB.add_review(conn, file_id=it.get("file_id"), plan_id=plan_id,
-                          kind=it.get("review_kind") or "low_conf",
+                          kind=RT.review_kind_for_reason(
+                              it.get("reason"), it.get("review_kind") or "low_conf"),
                           payload={"src": it.get("src"), "category": it.get("category"),
                                    "confidence": it.get("confidence"),
+                                   "confidence_original": it.get("confidence_original"),
                                    "reason": it.get("reason"),
                                    "evidence": it.get("evidence"),
                                    "suggested_dst": it.get("dst"),
@@ -991,26 +993,28 @@ def _apply_items(items, root, args, conn, plan_id):
 
     自动执行门控（P3，与 Web API 的 auto_apply 子集口径一致；2026-11-24
     计划 #160 修复）：只放行 common.routing.is_auto_apply_eligible 判定的项
-    ——confidence >= auto 阈值（默认 0.85，见 libraries.json thresholds.auto）
+    ——confidence >= 按项取的分模态阈值（0.2.5：LLM 文档 0.75、媒体 0.65、
+    规则分文档 0.85 兜底，见 libraries.json thresholds）
     且 kind 不是整目录 unit；整目录 unit 项永不自动执行，低于阈值的项永不
     自动执行；auto_exempt 例外已废除。被拦下的 move/rename 项不移动，改为写入
-    review_queue（kind=low_conf），出现在 Web 复核队列里等人工点。
+    review_queue（kind 按 reason 细分，见 review_kind_for_reason），出现在
+    Web 复核队列里等人工点。
     （背景：媒体引擎 score>=0.35 即出 move 项，低于统一自动执行阈值，
     不门控会把 0.40 置信的文件自动归位。）
     """
     cfg = _load_libraries()
-    threshold = float((cfg.get("thresholds") or {}).get("auto", 0.85))
+    thresholds = cfg.get("thresholds") or {}
     todo = [i for i in items if i.get("action") in ("move", "rename")]
     todo = [i for i in todo if not guard.is_excluded(i.get("src") or "")[0]]
     from common import routing as RT
     gated, held = [], []
     for i in todo:
-        if RT.is_auto_apply_eligible(i, threshold):
+        if RT.is_auto_apply_eligible(i, thresholds=thresholds):
             gated.append(i)
         else:
             held.append(i)
     if held:
-        print(f"  自动执行门控：{len(held)} 项置信度 < {threshold}，不自动移动，进复核队列")
+        print(f"  自动执行门控：{len(held)} 项未达分模态阈值，不自动移动，进复核队列")
         for i in held:
             # 0.1.9 去重：同一 src 已有复核行（待处理或已裁决）时不再新建；
             # 2026-11-27 提速改动 2：新建行带 size/mtime 指纹，已有行刷新指纹。
@@ -1019,9 +1023,10 @@ def _apply_items(items, root, args, conn, plan_id):
                 DB.refresh_review_fingerprint(conn, i.get("src"), size, mtime)
                 continue
             DB.add_review(conn, file_id=i.get("file_id"), plan_id=plan_id,
-                          kind="low_conf",
+                          kind=RT.review_kind_for_reason(i.get("reason"), "low_conf"),
                           payload={"src": i.get("src"), "category": i.get("category"),
                                    "confidence": i.get("confidence"),
+                                   "confidence_original": i.get("confidence_original"),
                                    "reason": i.get("reason"),
                                    "evidence": i.get("evidence"),
                                    "suggested_dst": i.get("dst"),

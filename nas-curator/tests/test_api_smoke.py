@@ -55,7 +55,7 @@ def test_dashboard(client):
 def test_review_list_and_decide(client):
     r = client.get("/api/review?status=pending")
     assert r.status_code == 200, r.text
-    rows = r.json()
+    rows = r.json()["items"]
     assert len(rows) >= 1
     rid = rows[0]["id"]
     # 拒绝：源文件不存在，只改状态
@@ -63,7 +63,7 @@ def test_review_list_and_decide(client):
     assert r.status_code == 200, r.text
     assert r.json().get("ok") is True
     r = client.get("/api/review?status=pending")
-    assert all(x["id"] != rid for x in r.json())
+    assert all(x["id"] != rid for x in r.json()["items"])
     print("review list+decide: PASS")
 
 

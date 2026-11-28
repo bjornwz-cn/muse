@@ -137,10 +137,16 @@ def _common_root(paths: list[str]) -> str:
     return base if os.path.isdir(base) else os.path.dirname(base)
 
 
-def _run_auto_apply(job_id: int, db_path: str, plan_id: int, threshold: float):
-    """收件箱 auto_apply 子集执行：只执行高置信（>= 阈值）且非整目录的
-    move/rename 项；整目录 unit 项与低置信项一律进复核（2026-11-24 计划
-    #160 修复，判定见 common.routing.is_auto_apply_eligible）。"""
+def _run_auto_apply(job_id: int, db_path: str, plan_id: int, thresholds=None):
+    """收件箱 auto_apply 子集执行：只执行按项取的分模态阈值（0.2.5：LLM 文档
+    0.75、媒体 0.65、规则分文档 0.85 兜底）判定的 move/rename 项；整目录
+    unit 项与低置信项一律进复核（2026-11-24 计划 #160 修复，判定见
+    common.routing.is_auto_apply_eligible）。
+    thresholds：libraries.json thresholds 字典；传浮点数时视为 {"auto": 值}
+    （向后兼容）。"""
+    if isinstance(thresholds, (int, float)):
+        thresholds = {"auto": float(thresholds)}
+    thresholds = thresholds or {}
     conn = DB.connect(db_path)
     try:
         DB.set_plan_status(conn, plan_id, "applying")
@@ -152,11 +158,11 @@ def _run_auto_apply(job_id: int, db_path: str, plan_id: int, threshold: float):
         for it in items:
             if it.get("action") not in ("move", "rename"):
                 continue
-            if RT.is_auto_apply_eligible(it, threshold):
+            if RT.is_auto_apply_eligible(it, thresholds=thresholds):
                 todo.append(it)
             else:
                 # P4：与 CLI _apply_items 口径对齐——被拦下的低置信项只置 skipped
-                # 还不够，必须写 review_queue（kind=low_conf），否则人工在 Web
+                # 还不够，必须写 review_queue，否则人工在 Web
                 # 复核队列里看不到、文件会静默留在原地无人处理。
                 conn.execute("UPDATE plan_items SET status='skipped' WHERE id=?",
                              (it["id"],))
@@ -172,10 +178,11 @@ def _run_auto_apply(job_id: int, db_path: str, plan_id: int, threshold: float):
                     skipped += 1
                     continue
                 DB.add_review(conn, file_id=it.get("file_id"), plan_id=plan_id,
-                              kind="low_conf",
+                              kind=RT.review_kind_for_reason(it.get("reason"), "low_conf"),
                               payload={"src": it.get("src"),
                                        "category": it.get("category"),
                                        "confidence": it.get("confidence"),
+                                       "confidence_original": RT.recover_confidence_original(it),
                                        "reason": it.get("reason"),
                                        "evidence": it.get("evidence"),
                                        "suggested_dst": it.get("dst"),
@@ -201,7 +208,9 @@ def _run_auto_apply(job_id: int, db_path: str, plan_id: int, threshold: float):
         DB.finish_job(conn, job_id, "done", {
             "plan_id": plan_id, "moved": report.get("moved", 0),
             "skipped": skipped, "failed": len(report.get("failed", [])),
-            "auto_applied": True, "threshold": threshold,
+            "auto_applied": True,
+            "threshold": thresholds.get("auto", 0.85),
+            "thresholds": thresholds,
         })
     except Exception as e:  # noqa: BLE001
         try:
@@ -518,9 +527,9 @@ def apply_plan(plan_id: int, conn=Depends(get_db)):
     job_id = DB.create_job(conn, "apply")
     settings = get_settings()
     if plan.get("library") == "inbox" and settings.get("auto_apply"):
-        threshold = float((settings.get("thresholds") or {}).get("auto", 0.85))
         threading.Thread(target=_run_auto_apply,
-                         args=(job_id, db_path, plan_id, threshold),
+                         args=(job_id, db_path, plan_id,
+                               settings.get("thresholds") or {}),
                          daemon=True).start()
         mode = "auto_apply_subset"
     else:

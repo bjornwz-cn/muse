@@ -47,7 +47,7 @@ def test_review_notes_per_kind(tmp_path, monkeypatch):
     c = _client(tmp_path, monkeypatch)
     r = c.get("/api/review", params={"status": "pending"})
     assert r.status_code == 200
-    notes = {row["kind"]: row["review_note"] for row in r.json()}
+    notes = {row["kind"]: row["review_note"] for row in r.json()["items"]}
     for kind, note in EXPECTED.items():
         assert notes[kind] == note
 
