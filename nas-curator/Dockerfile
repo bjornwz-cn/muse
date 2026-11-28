@@ -1,4 +1,4 @@
-# NAS Curator（文件管家）0.2.4 —— 飞牛 App 容器镜像
+# NAS Curator（文件管家）0.2.5 —— 飞牛 App 容器镜像
 # 多架构：amd64 + arm64（buildx 构建；本次 VM 沙箱无法启动容器，
 # 实际产物由手工组装脚本按同一份依赖清单生成，见 scripts/assemble-image.sh）。
 # 底镜像 python:3.12-slim（与 P1/P2 实测的 Python 3.12 一致）。

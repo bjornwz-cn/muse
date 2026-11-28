@@ -546,6 +546,21 @@ def test_dup_dry_run(client):
     print("dup dry-run: PASS")
 
 
+def test_version_consistent_everywhere():
+    """0.2.5 教训：升版须四处一致（VERSION、根 compose、fpk compose、
+    Dockerfile LABEL）——0.2.5 首轮升级就因 fpk compose 仍写 0.2.4 被
+    升级脚本的镜像校验拦下（status.json：新 compose 里镜像不是 0.2.5）。"""
+    import re
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    v = json.load(open(os.path.join(root, "VERSION"), encoding="utf-8"))["version"]
+    for rel in ("docker-compose.yml", "fpk/app/docker/docker-compose.yaml"):
+        text = open(os.path.join(root, rel), encoding="utf-8").read()
+        assert "image: nas-curator:%s" % v in text, (rel, v)
+    dockerfile = open(os.path.join(root, "Dockerfile"), encoding="utf-8").read()
+    assert 'org.opencontainers.image.version="%s"' % v in dockerfile
+    print("version consistent: %s" % v)
+
+
 def test_review_kind_migration_old_db(tmp_path):
     """§3.4：旧库（CHECK 不含新 kind）经 init_db 迁移后可写入新 kind，旧行不丢。"""
     import sqlite3
