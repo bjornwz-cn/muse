@@ -411,7 +411,7 @@ if __name__ == '__main__':
                         help='review kind to apply (default low_conf)')
     args = ap.parse_args()
     # 按 kind 分清单/汇总/映射文件，避免 low_conf 与 blur 互相覆盖。
-    global MANIFEST, SUMMARY, MAP, KIND
+    # （此处即模块顶层，直接赋值模块全局变量即可。）
     KIND = args.kind
     MANIFEST = '/data/vlm_r3_apply_%s.tsv' % args.kind
     SUMMARY = '/data/vlm_r3_apply_%s_summary.json' % args.kind
