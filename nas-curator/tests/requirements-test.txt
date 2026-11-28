@@ -1,5 +1,5 @@
 # 仅测试用（不进容器镜像；容器内 cv2 由系统层提供）。
 # 媒体引擎的解码/模糊/EXIF 测试需要 cv2 + numpy；缺失时相关测试
 # 以 pytest.importorskip 跳过，不失败。
-opencv-python-headless==5.1.0
+opencv-python-headless==5.1.0.95
 numpy
