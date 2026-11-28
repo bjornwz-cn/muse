@@ -256,9 +256,11 @@ def _persist_tags(conn, file_path, tags):
         pass  # 标签写失败不阻塞复核裁定本身
 
 
-def _execute_move(conn, review, src, dst, category, sha256, tags):
+def _execute_move(conn, review, src, dst, category, sha256, tags,
+                  batch_id=None):
     """apply_plan 单条移动 + 写 operations + plan_item 置 done。
-    返回 (moved, dst_path|失败原因)。"""
+    返回 (moved, dst_path|失败原因)。
+    batch_id（0.2.6）：批量移动的批号，写进 operations.batch_id 供按批回滚。"""
     from curator_core import engine as CE
     item = {"src": src, "dst": dst, "action": "move",
             "category": category or "06-其他", "sha256": sha256 or ""}
@@ -271,7 +273,13 @@ def _execute_move(conn, review, src, dst, category, sha256, tags):
         return False, f"移动失败：{failed.get('reason', '未知原因')}"
     op = operations[0]
     DB.add_operation(conn, review.get("plan_id"), op["src_path"], op["dst_path"],
-                     op.get("sha256"))
+                     op.get("sha256"), batch_id=batch_id)
+    # 0.2.6 P0-B：给移动后的新路径写“已裁决”指纹（payload.moved_to），供
+    # _ReviewSkipper 与 has_review_for_src 识别，防止已裁决文件被重新分类。
+    try:
+        DB.record_review_moved_to(conn, review.get("id"), op["dst_path"])
+    except Exception:
+        pass  # 指纹写失败不阻塞裁定本身
     _mark_plan_item_done(conn, review.get("plan_id"), src)
     if tags:
         _persist_tags(conn, op["dst_path"], tags)
@@ -279,9 +287,10 @@ def _execute_move(conn, review, src, dst, category, sha256, tags):
 
 
 def decide_one(conn, review_id: int, decision: str, body: DecideBody | None = None,
-               decided_by: str = "user") -> dict:
+               decided_by: str = "user", batch_id: str | None = None) -> dict:
     """单条裁定（供单条与批量共用）。返回 {ok, moved, dst?, note?}。
-    decided_by 缺省 'user'；重分类自动批准时传 'system:reclassify-0.2.5'。"""
+    decided_by 缺省 'user'；重分类自动批准时传 'system:reclassify-0.2.6'。
+    batch_id（0.2.6）：批量移动的批号，写进 operations.batch_id 供按批回滚。"""
     if decision not in ("approved", "rejected"):
         raise HTTPException(status_code=400, detail="decision 须为 approved|rejected")
     row = conn.execute("SELECT * FROM review_queue WHERE id=?", (review_id,)).fetchone()
@@ -321,7 +330,7 @@ def decide_one(conn, review_id: int, decision: str, body: DecideBody | None = No
         moved, res = _execute_move(
             conn, review, src, dst,
             payload.get("category") or DUP_CATEGORY,
-            payload.get("sha256") or "", tags)
+            payload.get("sha256") or "", tags, batch_id=batch_id)
         if not moved:
             return {"ok": True, "id": review_id, "moved": False, "note": res}
         return {"ok": True, "id": review_id, "moved": True, "dst": res,
@@ -347,7 +356,7 @@ def decide_one(conn, review_id: int, decision: str, body: DecideBody | None = No
         conn, review, src, dst,
         (body.category if body and body.category
          else payload.get("category") or "06-其他"),
-        payload.get("sha256") or "", tags)
+        payload.get("sha256") or "", tags, batch_id=batch_id)
     if not moved:
         return {"ok": True, "id": review_id, "moved": False, "note": res}
     return {"ok": True, "id": review_id, "moved": True, "dst": res}
@@ -536,6 +545,9 @@ class ReclassifyBody(BaseModel):
     folder: str | None = None
     apply: bool = False
     limit: int = 200
+    # 0.2.6 P4：排序，默认 created_at DESC（最新行优先）。此前按 id 升序只吃
+    # 最老的前 1,000 条，恰好全是补不出来的老行（母本实测 eligible=0）。
+    order: str = "desc"
 
 
 @router.post("/reclassify")
@@ -551,6 +563,13 @@ def reclassify(body: ReclassifyBody, conn=Depends(get_db)):
     limit = max(1, min(int(body.limit or 200), 1000))
     thresholds = (get_settings().get("thresholds") or {})
     roots = _roots()
+    # 0.2.6：本次 apply 的批号（operations.batch_id），回滚时可只回滚该批。
+    batch_id = None
+    if body.apply:
+        import uuid as _uuid
+        batch_id = ("reclassify-%s-%s"
+                    % (_now_iso().replace("-", "").replace(":", "").replace("T", "-"),
+                       _uuid.uuid4().hex[:6]))
     if body.ids is not None:
         if not body.ids:
             return {"total": 0, "eligible": 0, "applied": 0, "moved": 0,
@@ -576,6 +595,12 @@ def reclassify(body: ReclassifyBody, conn=Depends(get_db)):
                 if RT.review_folder_for(p.get("src") or "", roots)[0] == body.folder:
                     kept.append(r)
             rows = kept
+    # 0.2.6 P4：默认按 created_at DESC（最新行优先），不再只吃最老的前 1,000 条。
+    # ids 指定时保持传入顺序（调用方已排好）；order=asc 时按 created_at 升序。
+    if body.ids is None:
+        reverse = (body.order or "desc").lower() != "asc"
+        rows.sort(key=lambda r: (r.get("created_at") or "", r.get("id") or 0),
+                  reverse=reverse)
     rows = rows[:limit]
     results = []
     eligible_n = applied_n = moved_n = not_eligible_n = skipped_n = 0
@@ -634,7 +659,8 @@ def reclassify(body: ReclassifyBody, conn=Depends(get_db)):
         try:
             res = decide_one(conn, rid, "approved",
                              DecideBody(decision="approved", suggested_dst=dst),
-                             decided_by="system:reclassify-0.2.5")
+                             decided_by="system:reclassify-0.2.6",
+                             batch_id=batch_id)
         except HTTPException as e:
             results.append({"id": rid, "ok": False, "eligible": True,
                             "note": "批准失败：%s" % e.detail})
@@ -646,7 +672,7 @@ def reclassify(body: ReclassifyBody, conn=Depends(get_db)):
                         "note": res.get("note") or ""})
     return {"total": len(rows), "eligible": eligible_n, "applied": applied_n,
             "moved": moved_n, "not_eligible": not_eligible_n, "skipped": skipped_n,
-            "results": results}
+            "batch_id": batch_id, "results": results}
 
 
 @router.get("/dup/dry-run")

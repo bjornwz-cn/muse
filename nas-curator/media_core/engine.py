@@ -61,6 +61,7 @@ from .curate import (  # noqa: E402
     ensure_readable,
     get_image_exts,
     hamming,
+    is_blur_check_applicable,
     media_exts,
     scan_inbox,
     sha256_of,
@@ -73,6 +74,13 @@ try:
     from common.tags import gen_media_tags as _gen_media_tags
 except Exception:  # common 层不可用时降级为本地同义实现
     _gen_media_tags = None
+
+# 0.2.6 P0-C：holding 区顶层目录名（common.routing.DUP_HOLDING_TOP 的同值；
+# 用 try 兜底，common 层不可用时仍按字面值跳过 holding 区）。
+try:
+    from common.routing import DUP_HOLDING_TOP
+except Exception:  # noqa: BLE001
+    DUP_HOLDING_TOP = "99-待确认"
 
 try:
     from common.tags import exif_datetime as _exif_datetime
@@ -100,10 +108,11 @@ __all__ = [
 REVIEW_KINDS = ("low_conf", "dup", "blur", "ambiguous", "shell")
 
 # 默认阈值（与只读源 config.json 一致；cfg 里缺失时兜底，不改判定口径）。
+# 0.2.6 P1：blur_min 由 50 下调到 20（抽检 30 张 blur<5 全是 UI 素材误判）。
 _DEFAULT_THRESHOLDS = {
     "margin_min": 0.12,
     "score_min": 0.35,
-    "blur_min": 50,
+    "blur_min": 20,
     "phash_max_distance": 5,
     "near_dup_enabled": True,
 }
@@ -347,6 +356,16 @@ def plan_media_files(paths, cfg, *, classifier=None, index=None, library_root=No
             continue
         stats["media"] += 1
         kind_cn = "照片" if ext in get_image_exts() else "视频"
+        # 0.2.6 P0-C 兜底：holding 区（99-待确认）下的文件一律不分类——
+        # 已裁决的 dup 搬进 holding 后，任何直接调本函数的路径都不得再把它
+        # 判成重复（与 _collect_media_paths 的 P0-A 互为备份）。
+        if DUP_HOLDING_TOP in path.split(os.sep):
+            item = _base_item(path, name, kind_cn, size, ext, sha256="")
+            item.update({"action": "skip", "reason": "holding",
+                         "evidence": "99-待确认", "tags": [], "review_kind": None})
+            items.append(item)
+            stats["skipped"] += 1
+            continue
         row = {"path": path, "name": name, "kind": kind_cn,
                "size": size, "mtime": 0, "ext": ext}
         try:
@@ -421,7 +440,11 @@ def plan_media_files(paths, cfg, *, classifier=None, index=None, library_root=No
 
         # 4) 模糊（仅照片；与 decide() 的 blur 门一致，但先于模型推理判定，
         #    结果相同、省一次推理；classifier=None 时同样生效）。
-        if kind_cn == "照片" and blur < th["blur_min"]:
+        # 0.2.6 P1：截图类扩展名与小图（长边<100px）跳过模糊判定；
+        # 照片阈值 blur_min 由 50 下调到 20。
+        long_edge = max(frames[0].size) if frames else None
+        if kind_cn == "照片" and is_blur_check_applicable(ext, long_edge) \
+                and blur < th["blur_min"]:
             item = _review_item(_base_item(path, name, kind_cn, size, ext, sha),
                                 "模糊", 0.3, "blurry:%.1f" % blur,
                                 "", "blur", kind_cn,
@@ -453,7 +476,8 @@ def plan_media_files(paths, cfg, *, classifier=None, index=None, library_root=No
             # v0.2.2 自学习：打分后给匹配类目加分（decide 本体不动）。
             sc, _fired = _apply_media_boost(sc, learn_ctx, name)
             fired_ids = list(_fired or [])
-            cat, cat2, s1, s2, why = decide(row, sc, blur, white, colors, ar, "", eff)
+            cat, cat2, s1, s2, why = decide(row, sc, blur, white, colors, ar, "", eff,
+                                            long_edge=long_edge)
         if why == "accepted":
             # decide 接受分支：cat=top1、cat2=top2。
             evidence = "%s %.2f / %s %.2f" % (cat, s1, cat2, s2)

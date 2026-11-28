@@ -40,21 +40,60 @@ def mark_setup_done() -> None:
         f.write("setup done\n")
 
 
+def _merge_missing(dst: dict, src: dict) -> bool:
+    """0.2.6：把 src 里 dst 缺失的键补进 dst（只加不改、不删），返回是否改动。
+
+    递归处理 dict（如 thresholds）；用户已有的值一律保留。用于配置分发：
+    容器数据卷里的 libraries.json 是旧版时，新版镜像自带的键（如
+    auto_doc_llm/auto_media/auto_media_margin）能自动补齐，而不是
+    永远停留在旧版。
+    """
+    changed = False
+    for k, v in (src or {}).items():
+        if k not in dst:
+            dst[k] = v
+            changed = True
+        elif isinstance(dst[k], dict) and isinstance(v, dict):
+            if _merge_missing(dst[k], v):
+                changed = True
+    return changed
+
+
 def ensure_config() -> None:
     """容器首次启动：数据卷配置目录缺失时，从镜像自带 config/ 复制默认配置。
 
     只复制 libraries.json（不含任何凭据）；.env.local 绝不复制（向导页输入后才生成）。
     本地开发（CONFIG_DIR == 自带目录）时什么都不做。
+    0.2.6：卷里已有 libraries.json 时也做一次合并补齐——新版镜像自带配置里
+    新增的键（如 0.2.5 的 auto_doc_llm/auto_media/auto_media_margin）
+    若卷里缺失则补上，用户已有的值不动；只在有改动时写回。
     """
     if os.path.abspath(CONFIG_DIR) == os.path.abspath(SHIPPED_CONFIG_DIR):
         return
-    if os.path.exists(LIBRARIES_JSON):
-        return
-    os.makedirs(CONFIG_DIR, exist_ok=True)
     shipped = os.path.join(SHIPPED_CONFIG_DIR, "libraries.json")
-    if os.path.exists(shipped):
-        import shutil
-        shutil.copyfile(shipped, LIBRARIES_JSON)
+    if not os.path.exists(LIBRARIES_JSON):
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        if os.path.exists(shipped):
+            import shutil
+            shutil.copyfile(shipped, LIBRARIES_JSON)
+        return
+    if not os.path.exists(shipped):
+        return
+    try:
+        with open(shipped, encoding="utf-8") as f:
+            shipped_cfg = json.load(f)
+        with open(LIBRARIES_JSON, encoding="utf-8") as f:
+            volume_cfg = json.load(f)
+    except (OSError, ValueError):
+        return
+    if not isinstance(shipped_cfg, dict) or not isinstance(volume_cfg, dict):
+        return
+    if _merge_missing(volume_cfg, shipped_cfg):
+        try:
+            with open(LIBRARIES_JSON, "w", encoding="utf-8") as f:
+                json.dump(volume_cfg, f, ensure_ascii=False, indent=2)
+        except OSError:
+            pass
 
 DEFAULT_DB = os.path.join(PROJECT_ROOT, "data", "nas-curator.db")
 

@@ -501,6 +501,9 @@ def _store_plan(conn, library_id, rules_version, items):
                                    "evidence": it.get("evidence"),
                                    "suggested_dst": it.get("dst"),
                                    "size": size, "mtime": mtime,
+                                   # 0.2.6：复核 payload 带 sha256（plan-item 本来就有），
+                                   # 批准移动写 operations 时不再为空，回滚核对更可靠。
+                                   "sha256": it.get("sha256") or "",
                                    "tags": it.get("tags") or []})
     if n_dup_skipped:
         print(f"  复核去重：{n_dup_skipped} 项已有复核行（待处理或已裁决），不再新建复核行")
@@ -599,16 +602,22 @@ def cmd_selflearn(args):
 
 
 def _collect_media_paths(root):
-    """收集 root 下的照片/视频文件，跳过 _Review（已复核区）与隐藏目录。
+    """收集 root 下的照片/视频文件，跳过 _Review（已复核区）、99-待确认
+    （holding 区，含已裁决的 dup）与隐藏目录。
 
     P2(P1.1)：跳过 node_modules 目录与 TypeScript 声明文件 .d.mts
     （.mts 扩展名与 AVCHD 视频碰撞，146 个 node_modules 文件曾被误当视频抽帧）。
+    0.2.6 P0-A：与文档引擎口径一致——文档引擎经 scan_units(skip_tops=cat_tops)
+    跳过 99-待确认；媒体此前不跳过，dup 批准后移入 holding 区仍会被重新扫描、
+    再判重复、无限循环。DUP_HOLDING_TOP 即 "99-待确认"（common.routing）。
     """
     from media_core import media_exts
+    from common.routing import DUP_HOLDING_TOP
     out = []
     for dp, dns, fns in os.walk(root):
         dns[:] = [d for d in dns
-                  if d not in ("_Review", "node_modules") and not d.startswith(".")]
+                  if d not in ("_Review", "node_modules", DUP_HOLDING_TOP)
+                  and not d.startswith(".")]
         for fn in fns:
             if fn.lower().endswith(".d.mts"):
                 continue
@@ -746,7 +755,14 @@ def cmd_rollback(args):
                   {"source": "cli", "plan_id": getattr(args, "plan_id", None),
                    "map": getattr(args, "map", "")}) if _record_job(args) else None
     try:
-        if getattr(args, "plan_id", None):
+        if getattr(args, "batch_id", None):
+            # 0.2.6：按批号回滚（重分类等批量移动单独打批号，只回滚该批，
+            # 不连带 revert 同计划的旧移动）。
+            res = RB.rollback_from_batch(conn, args.batch_id, dry_run=args.dry_run)
+            print(f"{'[预演] ' if args.dry_run else ''}回滚批次 {args.batch_id}："
+                  f"{res['moved']} 项，缺失 {len(res['missing'])} 项，"
+                  f"失败 {len(res['failed'])} 项")
+        elif getattr(args, "plan_id", None):
             res = RB.rollback_from_operations(conn, args.plan_id, dry_run=args.dry_run)
             DB.set_plan_status(conn, args.plan_id, "rolled_back")
             print(f"{'[预演] ' if args.dry_run else ''}回滚 {res['moved']} 项，"
@@ -765,6 +781,7 @@ def cmd_rollback(args):
         raise
     if job is not None:
         job.done({"plan_id": getattr(args, "plan_id", None),
+                  "batch_id": getattr(args, "batch_id", None),
                   "moved": res["moved"], "missing": len(res["missing"]),
                   "failed": len(res["failed"]), "dry_run": bool(args.dry_run)})
     return 0
@@ -1031,6 +1048,9 @@ def _apply_items(items, root, args, conn, plan_id):
                                    "evidence": i.get("evidence"),
                                    "suggested_dst": i.get("dst"),
                                    "size": size, "mtime": mtime,
+                                   # 0.2.6：复核 payload 带 sha256（plan-item 本来就有），
+                                   # 批准移动写 operations 时不再为空，回滚核对更可靠。
+                                   "sha256": i.get("sha256") or "",
                                    "tags": i.get("tags") or []})
     todo = gated
     from curator_core import engine as CE
@@ -1372,6 +1392,8 @@ def build_parser():
     p4 = sub.add_parser("rollback", help="按映射表或计划回滚")
     p4.add_argument("--map", default="")
     p4.add_argument("--plan-id", type=int, default=0)
+    # 0.2.6：按批号回滚（重分类等批量移动单独打批号，只回滚该批）。
+    p4.add_argument("--batch-id", default="")
     p4.add_argument("--dry-run", action="store_true")
     p4.set_defaults(func=cmd_rollback)
 

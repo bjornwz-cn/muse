@@ -367,6 +367,41 @@ def best_category(name, body, ext, cats, min_score, w_body, default_cat, low_cat
     return best, best_score, f"sc:{best_score}", best_ev
 
 
+def scan_name_category(name, ext, cats, min_score=4, default_cat="06-其他",
+                       low_cat="99-待确认/04-低置信"):
+    """0.2.6 P3：扫描件文件名优先定类。
+
+    扫描 PDF 无正文可读，改由文件名定类：
+    1) 规则 best_category（文件名优先，name_first=True）——文件名命中规则
+       关键词（长词组）且分 ≥8 时直接定类；
+    2) 短词兜底 SCAN_NAME_STRONG_KEYWORDS——裸“注册证/合同/会议纪要”等
+       命中不上长词组时，按短词映射定类，打分 3×词长（与规则口径一致）。
+    返回 (category, score, reason, evidence)；无命中返回 ("", 0, "", "")。
+    命中但分 <8 时不采纳（避免弱信号误判），调用方仍进 scanned-no-text。
+    """
+    cat_paths = {c.get("path") for c in cats}
+    fcat, fsc, freason, fev = best_category(
+        name, "", ext, cats, min_score, 2, default_cat, low_cat,
+        name_first=True)
+    if fcat and fcat not in (low_cat, default_cat) and fsc >= 8:
+        return fcat, fsc, "scan-name:%s" % freason, (fev or "")[:80]
+    for kw, target in SCAN_NAME_STRONG_KEYWORDS:
+        if kw in name and target in cat_paths:
+            return target, 3 * len(kw), "scan-name:%s" % kw, "文件名:%s" % kw
+    return "", 0, "", ""
+
+
+def _is_garbled_zip(path):
+    """0.2.6 P3：zip 能否打开并列出目录；打不开即“乱码 zip”。"""
+    try:
+        import zipfile
+        with zipfile.ZipFile(path) as zf:
+            zf.namelist()
+        return False
+    except Exception:
+        return True
+
+
 # ---------------------------------------------------------------- 通用小件
 
 def load_cache(path):
@@ -478,6 +513,46 @@ def write_digest(path, root, units, rows, texts):
 
 _SENSITIVE_NAME_WORDS = ("密码", "password", "账号", "登录", "身份证", "护照", "银行卡", "token")
 _SENSITIVE_BODY_WORDS = ("密码", "身份证", "护照", "银行卡")
+
+# 0.2.6 P3：扫描件文件名强短词 → 类目。规则库关键词多为长词组
+# （如“产品注册证”“医疗器械经营许可证”），裸短词（“注册证”“合同”
+# “会议纪要”）命中不上；只用于扫描 PDF 的文件名优先分支，不影响
+# 正常文档分类。顺序即优先级（先命中者胜）；目标类目须在当前 rules
+# 的 categories 里，否则该条跳过。打分沿用规则口径：3 × 词长。
+SCAN_NAME_STRONG_KEYWORDS = (
+    ("检验检疫证明", "02-产品与注册"),
+    ("注册证", "02-产品与注册"),
+    ("检验报告", "02-产品与注册"),
+    ("防伪证明", "02-产品与注册"),
+    ("营业执照", "01-公司资质与证照"),
+    ("经营备案", "01-公司资质与证照"),
+    ("章程", "01-公司资质与证照"),
+    ("整改", "01-公司资质与证照"),
+    ("会议纪要", "09-会议与汇报"),
+    ("总办会", "09-会议与汇报"),
+    ("签到表", "09-会议与汇报"),
+    ("合同", "03-合同与协议"),
+    ("协议", "03-合同与协议"),
+    ("授权", "04-供应商与采购"),
+    ("承诺函", "04-供应商与采购"),
+    ("发票", "07-财务与经营分析"),
+    ("付款", "07-财务与经营分析"),
+    ("报关单", "06-库存与物流"),
+    ("配送", "06-库存与物流"),
+    ("中标", "12-招投标"),
+    ("离职", "11-人事与行政"),
+    ("在职证明", "11-人事与行政"),
+    ("花名册", "11-人事与行政"),
+    ("组织架构", "11-人事与行政"),
+    ("绩效", "11-人事与行政"),
+)
+
+# 0.2.6 P3：不支持的格式（本来就不该进文档/照片库），单列 unsupported kind，
+# 默认过滤，不混进“待人判断”。乱码 zip 另判（见 _is_garbled_zip）。
+UNSUPPORTED_EXTS = frozenset({
+    ".exe", ".webloc", ".url", ".lnk", ".msi", ".apk", ".dmg", ".app",
+    ".com", ".scr", ".dll", ".sys", ".bin", ".run", ".deb", ".rpm",
+})
 # key 只匹配独立词，避免误伤普通英文单词（如 keyboard、monkey）。
 _KEY_RE = re.compile(r"(?i)(?<![a-z])key(?![a-z])")
 
@@ -905,7 +980,23 @@ def plan_files(root, rules, *, llm=None, sem=None, prescreener=None, rename=Fals
                          "score": 0, "reason": "cloudsync-enc", "text_len": 0, "evidence": "",
                          "confidence": ""})
             continue
+        if ext in UNSUPPORTED_EXTS or (ext == ".zip" and _is_garbled_zip(p)):
+            # 0.2.6 P3：不支持的格式单列 unsupported kind（review_kind_for_reason
+            # 按 "unsupported" 前缀细分，Web 默认过滤），不混进“待人判断”。
+            rows.append({**base_row, "category": low_cat,
+                         "score": 0, "reason": "unsupported_ext:%s" % ext,
+                         "text_len": 0, "evidence": "", "confidence": ""})
+            continue
         if ext == ".pdf" and srcs.get(p) == "scanned":
+            # 0.2.6 P3：文件名优先——命中强关键词直接定类，不再一律进 scanned-no-text。
+            fcat, fsc, freason, fev = scan_name_category(
+                name, ext, cats, min_score, default_cat, low_cat)
+            if fcat:
+                rows.append({**base_row, "category": fcat,
+                             "score": fsc, "reason": freason,
+                             "text_len": 0, "evidence": fev,
+                             "confidence": ""})
+                continue
             rows.append({**base_row, "category": scan_cat,
                          "score": 0, "reason": "scanned-no-text", "text_len": 0,
                          "evidence": "", "confidence": ""})

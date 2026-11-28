@@ -36,6 +36,10 @@ def init_db(path: str | None = None) -> str:
         cols_op = [r[1] for r in conn.execute("PRAGMA table_info(operations)")]
         if "decided_by" not in cols_op:
             conn.execute("ALTER TABLE operations ADD COLUMN decided_by TEXT")
+        # 0.2.6：operations 表补 batch_id 列（重分类批次的移动单独打批号，
+        # 回滚时可只回滚该批，不连带 revert 同计划的旧移动）。
+        if "batch_id" not in cols_op:
+            conn.execute("ALTER TABLE operations ADD COLUMN batch_id TEXT")
         # 2026-11-28 0.2.5 §3.4：review_queue.kind 细分出 unreadable /
         # unsupported / no_text 三类杂项。旧库的 CHECK 约束不含新值，SQLite
         # 不支持 ALTER CHECK，须重建表（12 步标准流程）；新库 schema.sql
@@ -308,19 +312,27 @@ def get_plan(conn, plan_id):
 
 # ---------------------------------------------------------------- operations
 
-def add_operation(conn, plan_id, src_path, dst_path, sha256=None, decided_by=None):
+def add_operation(conn, plan_id, src_path, dst_path, sha256=None, decided_by=None,
+                  batch_id=None):
     """记一条执行记录；decided_by 记录是谁定的（如自动删除 auto:dup-sha256）。
 
     2026-11-27 提速改动 1：operations 表新增 decided_by 列（旧库由 init_db
     迁移补列）；删除行用 dst_path="<deleted>" 哨兵（见 common.dup_delete），
     回滚时跳过删除行。
+    0.2.6：batch_id——重分类等批量移动单独打批号，回滚时可只回滚该批。
     """
     cur = conn.execute(
-        "INSERT INTO operations (plan_id, src_path, dst_path, sha256, decided_by)"
-        " VALUES (?, ?, ?, ?, ?)",
-        (plan_id, src_path, dst_path, sha256, decided_by))
+        "INSERT INTO operations (plan_id, src_path, dst_path, sha256, decided_by,"
+        " batch_id) VALUES (?, ?, ?, ?, ?, ?)",
+        (plan_id, src_path, dst_path, sha256, decided_by, batch_id))
     conn.commit()
     return cur.lastrowid
+
+
+def list_operations_by_batch(conn, batch_id):
+    """0.2.6：按批号取某次批量移动的全部 operations 行（供按批回滚）。"""
+    return [_d(r) for r in conn.execute(
+        "SELECT * FROM operations WHERE batch_id=? ORDER BY id", (batch_id,))]
 
 
 def get_operation_for_src(conn, src):
@@ -388,7 +400,34 @@ def list_reviewed_fingerprints(conn):
             continue
         out[src] = {"size": p.get("size"), "mtime": p.get("mtime"),
                     "row_id": r["id"]}
+        # 0.2.6 P0-B：dup 批准后文件搬进 holding 区，新路径（payload.moved_to）
+        # 也要登记指纹，否则 _ReviewSkipper 认不出它、下一轮重新分类。
+        moved_to = p.get("moved_to")
+        if moved_to and moved_to != src:
+            out[moved_to] = {"size": p.get("size"), "mtime": p.get("mtime"),
+                             "row_id": r["id"]}
     return out
+
+
+def record_review_moved_to(conn, review_id, dst):
+    """0.2.6 P0-B：复核批准移动后，把新路径写进 payload.moved_to——
+    holding 区的新路径也要有“已裁决”指纹，供 _ReviewSkipper 与
+    has_review_for_src 识别。返回 True=写了。"""
+    row = conn.execute(
+        "SELECT payload FROM review_queue WHERE id=?", (review_id,)).fetchone()
+    if row is None:
+        return False
+    try:
+        p = json.loads(row["payload"]) if row["payload"] else {}
+    except ValueError:
+        p = {}
+    if not dst or p.get("moved_to") == dst:
+        return False
+    p["moved_to"] = dst
+    conn.execute("UPDATE review_queue SET payload=? WHERE id=?",
+                 (json.dumps(p, ensure_ascii=False), review_id))
+    conn.commit()
+    return True
 
 
 def refresh_review_fingerprint(conn, src, size=None, mtime=None):
@@ -423,8 +462,9 @@ def has_review_for_src(conn, src):
     """
     n = conn.execute(
         "SELECT COUNT(*) FROM review_queue WHERE "
-        "json_extract(payload, '$.src')=? AND status IN ('pending','approved','rejected')",
-        (src,)).fetchone()[0]
+        "(json_extract(payload, '$.src')=? OR json_extract(payload, '$.moved_to')=?)"
+        " AND status IN ('pending','approved','rejected')",
+        (src, src)).fetchone()[0]
     return n > 0
 
 

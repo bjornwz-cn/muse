@@ -549,7 +549,8 @@ def test_dup_dry_run(client):
 def test_version_consistent_everywhere():
     """0.2.5 教训：升版须四处一致（VERSION、根 compose、fpk compose、
     Dockerfile LABEL）——0.2.5 首轮升级就因 fpk compose 仍写 0.2.4 被
-    升级脚本的镜像校验拦下（status.json：新 compose 里镜像不是 0.2.5）。"""
+    升级脚本的镜像校验拦下（status.json：新 compose 里镜像不是 0.2.5）。
+    0.2.6：再加 fpk/manifest 的 version，共五处一致。"""
     import re
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     v = json.load(open(os.path.join(root, "VERSION"), encoding="utf-8"))["version"]
@@ -558,6 +559,8 @@ def test_version_consistent_everywhere():
         assert "image: nas-curator:%s" % v in text, (rel, v)
     dockerfile = open(os.path.join(root, "Dockerfile"), encoding="utf-8").read()
     assert 'org.opencontainers.image.version="%s"' % v in dockerfile
+    manifest = open(os.path.join(root, "fpk", "manifest"), encoding="utf-8").read()
+    assert re.search(r"^version\s*=\s*%s\s*$" % re.escape(v), manifest, re.M), v
     print("version consistent: %s" % v)
 
 

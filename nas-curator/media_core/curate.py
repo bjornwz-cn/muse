@@ -812,13 +812,37 @@ class Classifier:
         return {'sig': scs, 'zh': scz, 'sig_top': ts[0], 'sig_2': ts[1]}
 
 
-def decide(row, cls_scores, blur, white, colors, ar, note, cfg):
-    """判定（原逻辑逐字保留）：返回 (cat, cat2, s1, s2, why)。
+# 0.2.6 P1：截图类扩展名（UI 图标/截图天然低纹理，不做模糊判定）与
+# 小图门控阈值（长边 <100px 的图不做模糊判定）。
+SCREENSHOT_EXTS = {".png", ".gif", ".bmp", ".webp"}
+BLUR_MIN_EDGE = 100
+
+
+def is_blur_check_applicable(ext, long_edge=None):
+    """0.2.6 P1：该文件是否要做模糊判定。
+
+    截图类扩展名（png/gif/bmp/webp）跳过——UI 图标/截图天然低纹理，
+    Laplacian 方差趋近 0，与“拍糊”无法区分（抽检 30 张 blur<5 全是
+    UI 素材，0 张真糊）。小图（长边 <100px）也跳过——16×16 图标放大到
+    320px 再算 Laplacian，方差注定趋近 0。long_edge 为 None 时不做小图门控。
+    """
+    if (ext or "").lower() in SCREENSHOT_EXTS:
+        return False
+    if long_edge is not None and long_edge < BLUR_MIN_EDGE:
+        return False
+    return True
+
+
+def decide(row, cls_scores, blur, white, colors, ar, note, cfg, long_edge=None):
+    """判定（原逻辑逐字保留）：返回 (cat, cat2, s1, s2, why）。
 
     why 取值：'accepted' / 'decode_failed' / 'blurry' / 'low_confidence'。
     顺序：解码失败 → 待确认；照片 blur < blur_min → 模糊；
     margin < margin_min 或 top1 < score_min → 待确认；否则接受。
     白底规则优先：白底 ≥0.45 且截图/文档分高时判截图/文档（见三条分支）。
+    0.2.6 P1：模糊判定跳过截图类扩展名与小图（见 is_blur_check_applicable）；
+    照片阈值 blur_min 由 50 下调到 20（media_core/config.json 与
+    _DEFAULT_THRESHOLDS 同步）。long_edge 为原图长边（像素），None 时不做小图门控。
     """
     th = cfg['thresholds']
     cat, cat2, s1, s2 = '待确认', '待确认', 0.0, 0.0
@@ -838,7 +862,8 @@ def decide(row, cls_scores, blur, white, colors, ar, note, cfg):
     margin = s1 - s2
     if note:
         return '待确认', '待确认', s1, s2, 'decode_failed'
-    if row['kind'] == '照片' and blur < th['blur_min']:
+    if row['kind'] == '照片' and is_blur_check_applicable(row.get('ext'), long_edge) \
+            and blur < th['blur_min']:
         return '模糊', cat, s1, s2, 'blurry'
     if margin < th['margin_min'] or s1 < th['score_min']:
         return '待确认', cat, s1, s2, 'low_confidence'
@@ -1044,7 +1069,10 @@ def review_plan(cfg, scope, reuse_path='', limit=0, tag='', apply=False):
                 if cls is None:
                     cls = Classifier(cfg)
                 sc = cls.scores(img, r['kind'])
-                cat, cat2, s1, s2, why = decide(r, sc, blur, white, colors, ar, note, cfg)
+                # 0.2.6 P1：把原图长边传给 decide 做小图门控。
+                cat, cat2, s1, s2, why = decide(
+                    r, sc, blur, white, colors, ar, note, cfg,
+                    long_edge=max(img.size) if img is not None else None)
                 it.update(category=cat, score=round(s1, 3),
                           reason=why if why != 'accepted' else 'accepted(%s)' % cat2)
         if it['category'] in ('待确认', '模糊', '占位符'):

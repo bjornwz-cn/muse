@@ -14,7 +14,7 @@
   "thresholds": {
     "margin_min": 0.12,
     "score_min": 0.35,
-    "blur_min": 50,
+    "blur_min": 20,
     "phash_max_distance": 5,
     "near_dup_enabled": true
   },

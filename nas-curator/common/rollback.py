@@ -95,6 +95,27 @@ def rollback_from_map(map_path, dry_run=False):
     return {"moved": moved, "missing": missing, "failed": failed}
 
 
+def rollback_from_batch(conn, batch_id, dry_run=False, mark=True):
+    """0.2.6：按批号回滚某次批量移动（如一次重分类 apply），只回滚该批的
+    operations 行，不连带 revert 同 plan_id 的旧移动。返回同 rollback_from_operations。
+    """
+    from . import db as _db
+    from .dup_delete import DELETED_DST
+    ops = [o for o in _db.list_operations_by_batch(conn, batch_id)
+           if o["dst_path"] != DELETED_DST]
+    pairs = [(o["src_path"], o["dst_path"]) for o in ops]
+    moved, missing, failed = rollback_pairs(pairs, dry_run=dry_run)
+    if mark and not dry_run:
+        moved_dsts = set()
+        for o in ops:
+            if not os.path.exists(o["dst_path"]) and os.path.exists(o["src_path"]):
+                moved_dsts.add(o["id"])
+        for op_id in moved_dsts:
+            _db.mark_rolled_back(conn, op_id)
+    return {"moved": moved, "missing": missing, "failed": failed,
+            "batch_id": batch_id}
+
+
 def rollback_from_operations(conn, plan_id, dry_run=False, mark=True):
     """从 DB 的 operations 表回滚某次 plan；成功移回的逐条写 rolled_back_at。
 
