@@ -140,7 +140,6 @@ CREATE TABLE IF NOT EXISTS operations (
     rolled_back_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_operations_plan ON operations (plan_id);
-CREATE INDEX IF NOT EXISTS idx_operations_batch ON operations (batch_id);
 
 CREATE TABLE IF NOT EXISTS review_queue (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -408,3 +408,48 @@ def test_batch_id_rollback_only_that_batch(tmp_path):
     assert b_dst.exists() and not b_src.exists()
     conn.close()
     print("batch rollback only that batch: PASS")
+
+
+def test_027_init_db_migrates_old_operations_table(tmp_path):
+    """0.2.7 回归：0.2.6 的 schema.sql 在旧库上建 idx_operations_batch 会报
+    "no such column: batch_id"（旧 operations 表本无此列），init_db 整体失败、
+    容器起不来（0.2.6 首轮部署即因此回滚）。修复后 init_db 在旧库上应成功：
+    补列 + 建索引，且幂等。"""
+    db = str(tmp_path / "old.db")
+    conn = sqlite3.connect(db)
+    conn.execute("PRAGMA foreign_keys=OFF")
+    # 0.2.5 时代的 operations 表：有 decided_by，无 batch_id。
+    conn.execute("""
+        CREATE TABLE operations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plan_id INTEGER REFERENCES plans (id),
+            src_path TEXT NOT NULL,
+            dst_path TEXT NOT NULL,
+            sha256 TEXT,
+            decided_by TEXT,
+            executed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
+            rolled_back_at TEXT
+        )""")
+    conn.execute("CREATE INDEX idx_operations_plan ON operations (plan_id)")
+    conn.commit()
+    conn.close()
+    DB.init_db(db)  # 旧库上不应抛错
+    conn = DB.connect(db)
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(operations)")]
+    assert "batch_id" in cols, cols
+    assert "decided_by" in cols
+    idx = [r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' "
+        "AND tbl_name='operations'")]
+    assert "idx_operations_batch" in idx, idx
+    pid = DB.create_plan(conn, "work", None, {"n": 0, "move": 0, "review": 0})
+    DB.add_operation(conn, pid, "/a", "/b", "x" * 64, batch_id="t1")
+    ops = DB.list_operations_by_batch(conn, "t1")
+    assert len(ops) == 1 and ops[0]["src_path"] == "/a"
+    conn.close()
+    DB.init_db(db)  # 幂等：再跑一次不报错、不丢列
+    conn = DB.connect(db)
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(operations)")]
+    assert "batch_id" in cols
+    conn.close()
+    print("init_db migrates old operations table: PASS")

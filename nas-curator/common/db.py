@@ -40,6 +40,13 @@ def init_db(path: str | None = None) -> str:
         # 回滚时可只回滚该批，不连带 revert 同计划的旧移动）。
         if "batch_id" not in cols_op:
             conn.execute("ALTER TABLE operations ADD COLUMN batch_id TEXT")
+        # 0.2.7 修复：idx_operations_batch 不放 schema.sql——旧库的 operations
+        # 表本就没有 batch_id 列，executescript 建索引时会报
+        # "no such column: batch_id" 导致 init_db 整体失败、容器起不来
+        # （0.2.6 首轮部署即因此回滚）。索引改在这里建：列已保证存在
+        # （新库来自 CREATE TABLE，旧库来自上面的 ALTER）。
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_operations_batch "
+                     "ON operations (batch_id)")
         # 2026-11-28 0.2.5 §3.4：review_queue.kind 细分出 unreadable /
         # unsupported / no_text 三类杂项。旧库的 CHECK 约束不含新值，SQLite
         # 不支持 ALTER CHECK，须重建表（12 步标准流程）；新库 schema.sql
